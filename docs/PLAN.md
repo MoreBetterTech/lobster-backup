@@ -140,6 +140,25 @@ The agent is instructed (via AGENTS.md) to:
 - `lobsterfile.env` (environment variable values)
 - Both manifests
 
+### Default exclusions
+The following are excluded by default — all are regenerable and should not bloat the backup archive:
+
+**Inside `~/.openclaw/`:**
+- `node_modules/` — reinstall with `npm install`
+- `.git/` — git history is not backup content
+- `*.log` — log files
+- `tmp/`, `cache/`, `.cache/` — ephemeral
+
+**Inside workspace and external manifest paths:**
+- `node_modules/`
+- `.git/`
+- `__pycache__/`, `*.pyc`, `*.pyo`
+- `.venv/`, `venv/`, `env/` — Python virtual environments
+- `dist/`, `build/` — compiled/generated output
+- `*.tar.gz`, `*.zip` — archives within the backup path (avoid recursive backup)
+
+**Configurable:** Exclusions can be added or removed in the backup config. Default list follows `.gitignore` conventions. If a path in the external manifest has its own `.gitignore`, those rules are applied automatically.
+
 ---
 
 ## Lobster Scan
