@@ -62,6 +62,8 @@ Read in this order:
 - Prune: keep last 24 hourly, last 7 daily snapshots
 - Log result
 
+**Encryption update:** Build the full key-wrapping model from day 1. Do not simplify to passphrase-only — it creates an irrecoverable format break before v1.1. `age` makes multi-recipient trivial (`-r` flag). Generate Vault Key, wrap with passphrase key, wrap with recovery key, both wrappers in the archive header. The UX is the work, not the crypto.
+
 ### 4. Restore Script
 `lobster restore [--list] [--from <backup>] [--dry-run]`
 - `--list`: show available backups with timestamps and sizes

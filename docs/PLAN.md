@@ -34,10 +34,25 @@ A real-time log of every action that changes the claw's environment — like a D
 
 **The Lobsterfile is structural memory.** It records the history of how this specific claw's environment was built. It is as critical to maintain as `MEMORY.md` — in fact it *is* a form of memory: the record of structural and functional changes that make this claw unique. It must be updated immediately when a change is made, not batched at backup time.
 
-**AGENTS.md requirement (non-negotiable):**
-> Whenever a prompt leads you to make any change to the system environment — installing a package, enabling a service, creating a user, modifying a config file outside the workspace, registering an external dependency — you MUST append the corresponding step(s) to the Lobsterfile before considering the task complete. This is not optional. Treat it as the same obligation as updating MEMORY.md.
->
-> Prefix commands that require root with `sudo` exactly as you ran them. This preserves the privilege model so the restore script can run as a regular user.
+**AGENTS.md requirement:**
+When `lobster-backup` is installed, the setup script prints the following snippet and instructs the user to add it to AGENTS.md. Skills do not auto-modify core agent files — this is a manual step, but it is critical:
+
+```
+## Lobsterfile Maintenance (lobster-backup)
+Whenever a prompt leads you to make any change to the system environment —
+installing a package, enabling a service, creating a user, modifying a config
+file outside the workspace, registering an external dependency — you MUST
+append the corresponding step(s) to the Lobsterfile before considering the
+task complete. Same obligation as updating MEMORY.md.
+
+Rules:
+- Prefix commands requiring root with `sudo` exactly as you ran them
+- Write every step IDEMPOTENTLY — assume the script may run on a machine
+  where some steps are already done (e.g. `apt install` is safe; writing
+  a file needs an existence check or overwrite-safe redirect)
+- Use {{VARIABLE}} placeholders for any environment-specific values;
+  record the value in lobsterfile.env
+```
 
 **What goes in the Lobsterfile (everything that changes system state):**
 - Package installs: `apt install caddy`, `npm install -g openclaw`, `pip install ...`
@@ -128,7 +143,8 @@ The agent is instructed (via AGENTS.md) to:
 - `memory/*.json` (dream weights, heartbeat state, etc.)
 - `openclaw.json` (gateway config)
 - Custom skills in `~/.openclaw/skills/`
-- Cron job definitions
+- `cron/jobs.json` (cron job definitions — stored at `~/.openclaw/cron/jobs.json`)
+- `identity/` directory (agent identity, keypairs)
 
 ### External manifest (files outside `~/.openclaw`)
 - Registered at setup time — anything the lobster depends on that lives outside its home dir
@@ -161,6 +177,55 @@ The following are excluded by default — all are regenerable and should not blo
 
 ---
 
+## Archive Directory Structure
+
+The tarball mirrors the filesystem layout with two top-level prefixes:
+
+```
+backup-2026-03-09T03:00:00.tar.gz.age
+├── meta.json                    ← OC version, timestamp, manifest checksums
+├── internal/                    ← everything from ~/.openclaw/
+│   ├── openclaw.json
+│   ├── workspace/
+│   ├── skills/
+│   ├── cron/jobs.json
+│   ├── identity/
+│   └── ...
+├── external/                    ← external manifest files, path-preserved
+│   ├── etc/caddy/Caddyfile      ← was /etc/caddy/Caddyfile
+│   ├── etc/systemd/system/...
+│   └── var/www/...
+├── lobsterfile                  ← the Lobsterfile bash script
+├── lobsterfile.env              ← environment variable values
+├── manifest-internal.json       ← list of files backed up from internal
+└── manifest-external.json       ← list of files backed up from external
+```
+
+On restore:
+- `internal/` → unpacked relative to `~/.openclaw/`
+- `external/` → unpacked by prepending `/` (requires `sudo` for system paths)
+
+---
+
+## Bootstrapping Existing Claws
+
+New installs maintain the Lobsterfile from day one. Existing claws — where the environment was built incrementally without logging — need a starting point.
+
+`lobster setup` runs an **environment audit** to seed an approximate `lobsterfile.seed`:
+
+```bash
+dpkg --get-selections | grep -v deinstall   # installed apt packages
+npm list -g --depth=0                       # global npm packages  
+systemctl list-unit-files --state=enabled   # enabled systemd services
+pip list 2>/dev/null                        # Python packages if pip present
+```
+
+`lobsterfile.seed` is clearly labeled as **inferred, not authoritative** — it captures current state, not the sequence of commands that produced it, and may include system packages that predate the claw. The agent should review it and refine over time as new changes are made with proper Lobsterfile entries.
+
+The first backup for an existing claw is accepted to be incomplete on the environment side. Files are complete; environment reconstruction is best-effort.
+
+---
+
 ## Lobster Scan
 
 ```bash
@@ -177,9 +242,14 @@ Walks common system locations looking for files likely related to the OC environ
 - `/home/<user>/.config/systemd/` — user-scoped systemd units
 - Custom paths via `--paths`
 
+**Scan inputs:**
+1. Read `~/.openclaw/openclaw.json` for the gateway port (e.g. `18789`) and workspace path
+2. Use those as primary grep targets in config files
+3. Also scan for common OC-adjacent port patterns (`:8501` for Streamlit, `:18889` for secondary claws, etc.)
+
 **Heuristics for flagging files:**
-- References to OC ports, gateway URLs, or workspace paths in config files
-- Service unit files that exec OC-adjacent processes (node, openclaw, etc.)
+- Config files containing the gateway port or workspace path
+- Service unit files that exec `node`, `openclaw`, or workspace-adjacent processes
 - Caddy/nginx vhosts proxying to localhost ports used by OC or related services
 - Files in `~/.config/` belonging to tools referenced in TOOLS.md
 
