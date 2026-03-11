@@ -17,5 +17,8 @@
   "license": "MIT",
   "devDependencies": {
     "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "argon2": "^0.44.0"
   }
 }

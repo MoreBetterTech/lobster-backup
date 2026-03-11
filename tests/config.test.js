@@ -83,7 +83,7 @@ describe('Config Management', () => {
     const resolved = resolveConfigPaths(config);
 
     // Should use os.homedir(), not a hardcoded path
-    expect(resolved.backupPath).toStartWith(mockHome);
+    expect(resolved.backupPath.startsWith(mockHome)).toBe(true);
     expect(resolved.backupPath).not.toContain('/home/ubuntu/');
   });
 
