@@ -175,6 +175,24 @@ The following are excluded by default — all are regenerable and should not blo
 
 **Configurable:** Exclusions can be added or removed in the backup config. Default list follows `.gitignore` conventions. If a path in the external manifest has its own `.gitignore`, those rules are applied automatically.
 
+### Special case: git repos in the external manifest
+
+If a registered external path is a git repository with a remote, do **not** tarball it. Instead:
+
+1. Record the reconstitution steps in the Lobsterfile:
+   ```bash
+   git clone <remote-url> <local-path>
+   cd <local-path>
+   git checkout <branch-or-tag>   # pin to a specific ref
+   # any post-clone setup steps (npm install, etc.)
+   ```
+2. The backup captures only the remote URL and ref — not the working tree
+3. On restore, `git clone` regenerates the repo cleanly, including history
+
+**Why:** Tarballing a git repo gives you a snapshot without history (since `.git/` is excluded), which is worse than a fresh clone from the remote. A `git clone` is always the right reconstitution path for anything with a remote.
+
+**Agent instruction:** When registering a git repo in the external manifest, check for a remote (`git remote -v`). If one exists, write the `git clone` entry in the Lobsterfile rather than relying on the backup tarball.
+
 ---
 
 ## Archive Directory Structure
