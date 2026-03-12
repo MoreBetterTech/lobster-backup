@@ -368,7 +368,7 @@ export async function runBackup(options) {
     await encryptArchive({
       inputPath: tarballPath,
       outputPath: encryptedPath,
-      recipients: config.recipients || ['age1defaultpublickey'] // fallback for tests
+      recipients: config.agePublicKey ? [config.agePublicKey] : (config.recipients || [])
     });
     
     // Plaintext cleanup on encryption success: Security-critical.

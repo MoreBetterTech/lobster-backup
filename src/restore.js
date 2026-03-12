@@ -229,36 +229,38 @@ export async function promptForCredential(mockIO) {
  */
 export async function decryptBackup({ archivePath, credentialType, passphrase, recoveryKey, config }) {
   try {
-    // Step 1: Unwrap the vault key using the provided credential
-    let vaultKey;
-
+    // Step 1: Verify credentials by unwrapping the vault key.
+    // This proves the passphrase/recovery key is correct before we attempt decryption.
     if (credentialType === 'passphrase' && passphrase) {
-      // Passphrase path: derive wrapping key via Argon2id, then unwrap vault key
       if (!config.argon2Salt || !config.vaultKeyWrappedPassphrase) {
         throw new Error('Missing Argon2 salt or wrapped vault key in config');
       }
       const salt = Buffer.from(config.argon2Salt, 'base64');
       const wrappingKey = await derivePassphraseKey(passphrase, salt);
       const wrappedVaultKey = Buffer.from(config.vaultKeyWrappedPassphrase, 'base64');
-      vaultKey = await unwrapVaultKey(wrappedVaultKey, wrappingKey);
+      await unwrapVaultKey(wrappedVaultKey, wrappingKey);
     } else if (credentialType === 'recovery' && recoveryKey) {
-      // Recovery key path: use recovery key directly as wrapping key to unwrap vault key
       if (!config.vaultKeyWrappedRecovery) {
         throw new Error('Missing recovery-wrapped vault key in config');
       }
       const recoveryKeyBuffer = Buffer.from(recoveryKey, 'base64');
       const wrappedVaultKey = Buffer.from(config.vaultKeyWrappedRecovery, 'base64');
-      vaultKey = await unwrapVaultKey(wrappedVaultKey, recoveryKeyBuffer);
+      await unwrapVaultKey(wrappedVaultKey, recoveryKeyBuffer);
     } else {
       throw new Error('Invalid credential type or missing credentials');
     }
 
-    // Step 2: Write vault key as a temporary age identity file for decryption
+    // Step 2: Use the age private key from config to decrypt the archive.
+    // The private key is what age needs to decrypt files encrypted to the matching public key.
+    if (!config.agePrivateKey) {
+      throw new Error('Missing age private key in config — was setup completed?');
+    }
+
     const tmpIdentityPath = path.join(os.tmpdir(), `lobster-identity-${Date.now()}`);
     try {
-      fs.writeFileSync(tmpIdentityPath, vaultKey.toString('base64'), { mode: 0o600 });
+      fs.writeFileSync(tmpIdentityPath, config.agePrivateKey + '\n', { mode: 0o600 });
 
-      // Step 3: Decrypt archive using the vault key identity
+      // Step 3: Decrypt archive using the age private key
       const result = await decryptArchive({
         inputPath: archivePath,
         identityPath: tmpIdentityPath,

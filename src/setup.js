@@ -14,6 +14,7 @@ import {
   generateSalt,
   generateVaultKey as cryptoGenerateVaultKey,
   generateRecoveryKey as cryptoGenerateRecoveryKey,
+  generateAgeKeypair,
   derivePassphraseKey,
   wrapVaultKey
 } from './crypto.js';
@@ -158,6 +159,12 @@ export async function runSetup(options) {
   const vaultKeyWrappedPassphrase = await wrapVaultKey(vaultKeyBuffer, passphraseKey);
   const vaultKeyWrappedRecovery = await wrapVaultKey(vaultKeyBuffer, recoveryKeyBuffer);
 
+  // 6b. Generate an age keypair for archive encryption.
+  // The public key is the "recipient" that age encrypts TO.
+  // The private key is stored (wrapped by vault key) so restore can decrypt.
+  const ageKeypair = generateAgeKeypair();
+  io.write(`\nGenerated age encryption keypair (public: ${ageKeypair.publicKey.slice(0, 20)}...)`);
+
   // 7. Show summary
   io.write('\n📋 **Setup Summary**');
   io.write(`Backup destination: ${resolvedBackupPath}`);
@@ -178,6 +185,9 @@ export async function runSetup(options) {
     vaultKeyWrappedPassphrase: vaultKeyWrappedPassphrase.toString('base64'),
     vaultKeyWrappedRecovery: vaultKeyWrappedRecovery.toString('base64'),
     argon2Salt: salt.toString('base64'),
+    // age keypair: public key is the encryption recipient, private key is for decryption
+    agePublicKey: ageKeypair.publicKey,
+    agePrivateKey: ageKeypair.privateKey,
     formatVersion: 1,
     schedule: {
       hourly: true,
