@@ -268,15 +268,7 @@ export async function runBackup(options) {
   let tempFiles = [];
   
   try {
-    // Check that age is installed before attempting backup
-    try {
-      execSync('which age', { stdio: 'pipe' });
-    } catch {
-      throw new Error(
-        'age is not installed. Install it: sudo apt-get install -y age (Ubuntu/Debian) or brew install age (macOS)'
-      );
-    }
-
+    // Prerequisites (age, etc.) are checked by the CLI preflight.
     // Acquire lock
     acquireLock();
     lockAcquired = true;

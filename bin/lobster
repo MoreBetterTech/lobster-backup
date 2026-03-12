@@ -60,6 +60,85 @@ Usage:
 `);
 }
 
+/**
+ * Preflight check — verify all prerequisites before running any subcommand.
+ * Offers to install missing dependencies interactively.
+ */
+async function preflight(io) {
+  const { execSync } = await import('node:child_process');
+  const checks = [
+    {
+      name: 'age',
+      check: () => { execSync('which age', { stdio: 'pipe' }); },
+      install: {
+        prompt: 'age (encryption tool) is not installed. Install it now?',
+        commands: {
+          'apt-get': 'sudo apt-get install -y age',
+          'brew': 'brew install age',
+        },
+      },
+    },
+    {
+      name: 'Node.js',
+      check: () => { /* we're running in Node, so this always passes */ },
+    },
+    {
+      name: 'OpenClaw',
+      check: () => { execSync('which openclaw', { stdio: 'pipe' }); },
+      // Don't offer to install OC — it's a bigger setup
+      warn: 'openclaw not found on PATH. lobster-backup works best with OpenClaw installed.',
+    },
+  ];
+
+  console.log('🦞 lobster-backup preflight check...\n');
+  let allGood = true;
+
+  for (const dep of checks) {
+    try {
+      dep.check();
+      console.log(`  ✓ ${dep.name}`);
+    } catch {
+      if (dep.install) {
+        console.log(`  ✗ ${dep.name} not found`);
+        allGood = false;
+
+        const answer = await io.prompt(`  ${dep.install.prompt} [y/n]: `);
+        if (answer.trim().toLowerCase() === 'y') {
+          // Detect package manager
+          let installed = false;
+          for (const [pm, cmd] of Object.entries(dep.install.commands)) {
+            try {
+              execSync(`which ${pm}`, { stdio: 'pipe' });
+              console.log(`  → ${cmd}`);
+              execSync(cmd, { stdio: 'inherit' });
+              // Verify it worked
+              dep.check();
+              console.log(`  ✓ ${dep.name} installed`);
+              installed = true;
+              break;
+            } catch {
+              continue;
+            }
+          }
+          if (!installed) {
+            console.error(`  ✗ Could not install ${dep.name}. Install manually and try again.`);
+            console.error(`    See: https://github.com/FiloSottile/age#installation`);
+            process.exit(1);
+          }
+        } else {
+          console.error(`  ✗ ${dep.name} is required. Aborting.`);
+          process.exit(1);
+        }
+      } else if (dep.warn) {
+        console.log(`  ⚠ ${dep.warn}`);
+      }
+    }
+  }
+
+  console.log('');
+  return allGood;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const { command, flags, unknownCommand } = parseArgs(args);
@@ -70,6 +149,11 @@ async function main() {
   }
 
   const io = createIO();
+
+  // Run preflight before any subcommand (except scan which doesn't need age)
+  if (command !== 'scan') {
+    await preflight(io);
+  }
 
   try {
     switch (command) {

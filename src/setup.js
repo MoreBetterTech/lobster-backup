@@ -102,19 +102,8 @@ async function hashPassphrase(passphrase, salt) {
 export async function runSetup(options) {
   const { io, passphrase, passphraseConfirm, backupPath, skipScan, skipConfirmation } = options;
   
-  // 0. Check prerequisites
-  try {
-    execSync('which age', { stdio: 'pipe' });
-  } catch {
-    throw new Error(
-      'age is not installed. lobster-backup requires age for encryption.\n\n' +
-      'Install it:\n' +
-      '  Ubuntu/Debian: sudo apt-get install -y age\n' +
-      '  macOS:         brew install age\n' +
-      '  Other:         https://github.com/FiloSottile/age#installation\n\n' +
-      'Then run `lobster setup` again.'
-    );
-  }
+  // Prerequisites (age, node, etc.) are checked by the CLI preflight.
+  // If someone calls runSetup programmatically, they're responsible for prereqs.
 
   // 1. Check for existing config
   const configPath = path.join(os.homedir(), '.openclaw', 'lobster-backup.json');
