@@ -6,7 +6,7 @@
  */
 
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import argon2 from 'argon2';
 
 // Use age for archive encryption over GPG because:
@@ -54,8 +54,8 @@ export function generateRecoveryKey() {
  * @returns {Object} {publicKey: string, privateKey: string}
  */
 export function generateAgeKeypair() {
-  // Use age-keygen to generate a keypair
-  const output = execSync('age-keygen', { encoding: 'utf8' });
+  // Use age-keygen to generate a keypair (execFileSync avoids shell)
+  const output = execFileSync('age-keygen', [], { encoding: 'utf8' });
   
   // Parse the output to extract public and private keys
   const lines = output.trim().split('\n');
@@ -163,12 +163,15 @@ export async function unwrapVaultKey(wrapped, wrappingKey) {
  * @returns {Promise<void>}
  */
 export async function encryptArchive({ inputPath, outputPath, recipients }) {
-  // Build age command with multiple recipients
-  const recipientArgs = recipients.flatMap(recipient => ['-r', recipient]);
-  const cmd = ['age', '--encrypt', ...recipientArgs, '-o', outputPath, inputPath].join(' ');
-  
+  // Use execFileSync with args array to avoid shell injection via paths or recipient keys
+  const args = ['--encrypt'];
+  for (const recipient of recipients) {
+    args.push('-r', recipient);
+  }
+  args.push('-o', outputPath, inputPath);
+
   try {
-    execSync(cmd, { stdio: 'pipe' });
+    execFileSync('age', args, { stdio: 'pipe' });
   } catch (error) {
     throw new Error(`Failed to encrypt archive: ${error.message}`);
   }
@@ -182,13 +185,11 @@ export async function encryptArchive({ inputPath, outputPath, recipients }) {
  * @returns {Promise<Buffer>} Decrypted content
  */
 export async function decryptArchive({ inputPath, identityPath }) {
-  const cmd = `age --decrypt -i ${identityPath} ${inputPath}`;
-  
   try {
-    const result = execSync(cmd, { stdio: 'pipe' });
+    // Use execFileSync with args array to avoid shell injection via file paths
+    const result = execFileSync('age', ['--decrypt', '-i', identityPath, inputPath], { stdio: 'pipe' });
     return result;
   } catch (error) {
-    // Simple error handling - just use a generic message if error parsing fails
     throw new Error('Failed to decrypt archive: decryption failed');
   }
 }

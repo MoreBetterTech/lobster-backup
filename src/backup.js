@@ -7,7 +7,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { execSync, execFileSync } from 'node:child_process';
 import { generateInternalManifest, readExternalManifest, detectGitRepo } from './manifest.js';
 import { detectNewVariables, parseEnvFile } from './lobsterfile-env.js';
 import { encryptArchive } from './crypto.js';
@@ -126,7 +127,8 @@ export async function createArchive(options) {
     gitRepos = []
   } = options;
   
-  const timestamp = new Date().toISOString().replace(/\./g, '').slice(0, 19);
+  // Replace colons and dots to produce filesystem-safe timestamps (e.g. 2026-03-12T14-32-45)
+  const timestamp = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
   const tarballPath = path.join(backupDir, `backup-${timestamp}.tar.gz`);
   
   // Create backup directory if it doesn't exist
@@ -148,94 +150,91 @@ export async function createArchive(options) {
       ocVersion = 'unknown';
     }
     
-    // Create meta.json
-    const meta = {
-      ocVersion,
-      timestamp: new Date().toISOString(),
-      checksums: {
-        internal: 'placeholder', // TODO: implement actual checksums
-        external: 'placeholder'
+    // Checksums are computed per-file and stored in meta.json so that 
+    // restore can verify archive integrity before touching the filesystem.
+    // meta.json itself is excluded from checksums (can't hash its own content).
+    const fileChecksums = {};
+
+    function checksumFile(filePath, archiveRelativePath) {
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath);
+        fileChecksums[archiveRelativePath] = createHash('sha256').update(content).digest('hex');
       }
-    };
-    fs.writeFileSync(path.join(tempDir, 'meta.json'), JSON.stringify(meta, null, 2));
+    }
     
     // Write manifest files
-    fs.writeFileSync(
-      path.join(tempDir, 'manifest-internal.json'),
-      JSON.stringify(internalManifest, null, 2)
-    );
-    fs.writeFileSync(
-      path.join(tempDir, 'manifest-external.json'),
-      JSON.stringify(externalManifest, null, 2)
-    );
-    
-    // Build tar command
-    let tarCmd = `tar -czf "${tarballPath}"`;
-    
-    // Add exclusions
-    const exclusions = [
-      '--exclude=node_modules',
-      '--exclude=.git',
-      '--exclude=__pycache__',
-      '--exclude=*.pyc',
-      '--exclude=*.pyo',
-      '--exclude=.venv',
-      '--exclude=venv',
-      '--exclude=env',
-      '--exclude=dist',
-      '--exclude=build',
-      '--exclude=*.tar.gz',
-      '--exclude=*.zip'
-    ];
-    tarCmd += ` ${exclusions.join(' ')}`;
-    
-    // Add files at top level
-    tarCmd += ` -C "${tempDir}" meta.json manifest-internal.json manifest-external.json`;
-    
-    // Add lobsterfile if provided
+    const manifestInternalContent = JSON.stringify(internalManifest, null, 2);
+    const manifestExternalContent = JSON.stringify(externalManifest, null, 2);
+    fs.writeFileSync(path.join(tempDir, 'manifest-internal.json'), manifestInternalContent);
+    fs.writeFileSync(path.join(tempDir, 'manifest-external.json'), manifestExternalContent);
+    checksumFile(path.join(tempDir, 'manifest-internal.json'), 'manifest-internal.json');
+    checksumFile(path.join(tempDir, 'manifest-external.json'), 'manifest-external.json');
+
+    // Stage files into tempDir using directory structure instead of --add-file/--transform.
+    // This avoids GNU tar-specific flags and eliminates shell injection via filenames.
+
+    // Stage lobsterfile if provided
     if (lobsterfilePath && fs.existsSync(lobsterfilePath)) {
-      tarCmd += ` --add-file="${lobsterfilePath}" --transform='s|.*/||'`;
+      fs.copyFileSync(lobsterfilePath, path.join(tempDir, 'lobsterfile'));
+      checksumFile(path.join(tempDir, 'lobsterfile'), 'lobsterfile');
     }
-    
-    // Add lobsterfile.env if provided
+
+    // Stage lobsterfile.env if provided
     if (lobsterfileEnvPath && fs.existsSync(lobsterfileEnvPath)) {
-      tarCmd += ` --add-file="${lobsterfileEnvPath}" --transform='s|.*/||'`;
+      fs.copyFileSync(lobsterfileEnvPath, path.join(tempDir, 'lobsterfile.env'));
+      checksumFile(path.join(tempDir, 'lobsterfile.env'), 'lobsterfile.env');
     }
-    
-    // Add internal files with internal/ prefix
+
+    // Stage internal files under internal/ subdirectory
+    const internalStageDir = path.join(tempDir, 'internal');
     for (const filePath of internalManifest) {
       if (fs.existsSync(filePath)) {
         const homeDir = os.homedir();
         const openclawDir = path.join(homeDir, '.openclaw');
-        
+
         if (filePath.startsWith(openclawDir)) {
-          // Strip the ~/.openclaw prefix and add internal/ prefix
           const relativePath = path.relative(openclawDir, filePath);
-          tarCmd += ` --add-file="${filePath}" --transform='s|^|internal/|'`;
+          const destPath = path.join(internalStageDir, relativePath);
+          fs.mkdirSync(path.dirname(destPath), { recursive: true });
+          fs.copyFileSync(filePath, destPath);
+          checksumFile(destPath, `internal/${relativePath}`);
         }
       }
     }
-    
-    // Add external files with external/ prefix (excluding git repos with remotes)
+
+    // Stage external files under external/ subdirectory (excluding git repos with remotes)
+    const externalStageDir = path.join(tempDir, 'external');
     for (const filePath of externalManifest) {
-      // Git repos with remotes skip tarballing: Tarballing a git repo gives 
-      // a snapshot without history (since .git/ is excluded). A fresh 
-      // 'git clone' from the remote is strictly better — you get full 
+      // Git repos with remotes skip tarballing: Tarballing a git repo gives
+      // a snapshot without history (since .git/ is excluded). A fresh
+      // 'git clone' from the remote is strictly better — you get full
       // history AND the correct reconstitution path.
       const repo = gitRepos.find(r => r.path === filePath);
       if (repo && repo.hasRemote) {
         continue; // Skip - this is handled by Lobsterfile clone entries
       }
-      
+
       if (fs.existsSync(filePath)) {
-        // Strip leading / and add external/ prefix
         const pathWithoutRoot = filePath.startsWith('/') ? filePath.slice(1) : filePath;
-        tarCmd += ` --add-file="${filePath}" --transform='s|^|external/${pathWithoutRoot}|'`;
+        const destPath = path.join(externalStageDir, pathWithoutRoot);
+        fs.mkdirSync(path.dirname(destPath), { recursive: true });
+        fs.copyFileSync(filePath, destPath);
+        checksumFile(destPath, `external/${pathWithoutRoot}`);
       }
     }
-    
-    // Execute tar command
-    execSync(tarCmd, { stdio: 'pipe' });
+
+    // Write meta.json last so it includes all computed checksums
+    const meta = {
+      ocVersion,
+      timestamp: new Date().toISOString(),
+      formatVersion: 1,
+      checksums: fileChecksums
+    };
+    fs.writeFileSync(path.join(tempDir, 'meta.json'), JSON.stringify(meta, null, 2));
+
+    // Create tarball from staged directory using execFileSync (no shell injection)
+    const tarArgs = ['-czf', tarballPath, '-C', tempDir, '.'];
+    execFileSync('tar', tarArgs, { stdio: 'pipe' });
     
     return tarballPath;
   } finally {
@@ -273,8 +272,8 @@ export async function runBackup(options) {
     acquireLock();
     lockAcquired = true;
     
-    // Generate timestamp for filename
-    const timestamp = new Date().toISOString().replace(/\./g, '').slice(0, 19);
+    // Generate timestamp for filename (filesystem-safe: no colons or dots)
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
     const filename = `backup-${timestamp}.tar.gz.age`;
     
     const warnings = [];

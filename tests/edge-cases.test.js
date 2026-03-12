@@ -160,21 +160,29 @@ describe('Edge Cases & Error Handling', () => {
 
   it('very large files in external manifest (no OOM)', async () => {
     const { createArchive } = await import('../src/backup.js');
+    const { execFileSync } = await import('node:child_process');
 
     // Mock a very large file in the manifest
     fs.statSync.mockReturnValue({ size: 10 * 1024 * 1024 * 1024 }); // 10GB
-    execSync.mockReturnValue('');
+    fs.existsSync.mockReturnValue(true);
+    fs.mkdirSync.mockReturnValue(undefined);
     fs.writeFileSync.mockReturnValue(undefined);
+    fs.copyFileSync.mockReturnValue(undefined);
+    fs.readFileSync.mockReturnValue(Buffer.from('content'));
+    fs.rmSync.mockReturnValue(undefined);
+    execSync.mockReturnValue('unknown');
+    execFileSync.mockReturnValue('');
 
-    // The archive creation should use streaming (tar), not read into memory
+    // The archive creation should use tar via execFileSync (streams, doesn't load into memory)
     await createArchive({
       internalManifest: [],
       externalManifest: ['/var/data/huge-database-dump.sql'],
       backupDir,
     });
 
-    // tar command should be used (streams, doesn't load into memory)
-    const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-    expect(tarCmd).toBeDefined();
+    // tar should be called via execFileSync (not execSync with string interpolation)
+    const tarCall = execFileSync.mock.calls.find((c) => c[0] === 'tar');
+    expect(tarCall).toBeDefined();
+    expect(tarCall[1]).toContain('-czf');
   });
 });

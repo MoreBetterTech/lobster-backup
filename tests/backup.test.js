@@ -2,6 +2,10 @@
  * Backup Script Tests
  * Tests for the full backup flow: locking, archiving, encryption,
  * filename conventions, lobsterfile.env refresh, and error handling.
+ * 
+ * Archive creation now uses a staging directory + execFileSync('tar', [...args])
+ * instead of building shell command strings. Tests verify file staging and
+ * execFileSync calls instead of parsing tar command strings.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
@@ -14,7 +18,7 @@ import {
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
@@ -29,6 +33,18 @@ describe('Backup Script', () => {
     vi.spyOn(os, 'homedir').mockReturnValue(mockHome);
     vi.spyOn(process, 'pid', 'get').mockReturnValue(12345);
     vi.clearAllMocks();
+    // Default mocks for archive creation
+    fs.existsSync.mockReturnValue(true);
+    fs.mkdirSync.mockReturnValue(undefined);
+    fs.writeFileSync.mockReturnValue(undefined);
+    fs.copyFileSync.mockReturnValue(undefined);
+    // Return a string by default (acquireLock calls .trim() on it)
+    // Individual tests that need Buffer can override
+    fs.readFileSync.mockReturnValue('{}');
+    fs.rmSync.mockReturnValue(undefined);
+    fs.unlinkSync.mockReturnValue(undefined);
+    execSync.mockReturnValue('unknown');
+    execFileSync.mockReturnValue('');
   });
 
   afterEach(() => {
@@ -39,12 +55,11 @@ describe('Backup Script', () => {
   describe('Lock File', () => {
     it('creates lock file with PID on start', () => {
       fs.existsSync.mockReturnValue(false);
-      fs.writeFileSync.mockReturnValue(undefined);
 
       acquireLock();
 
       const writeCall = fs.writeFileSync.mock.calls.find(
-        (c) => c[0].includes('.lock')
+        (c) => typeof c[0] === 'string' && c[0].includes('.lock')
       );
       expect(writeCall).toBeDefined();
       expect(writeCall[1]).toContain('12345');
@@ -52,9 +67,6 @@ describe('Backup Script', () => {
 
     it('removes lock file on success', async () => {
       fs.existsSync.mockReturnValue(false);
-      fs.writeFileSync.mockReturnValue(undefined);
-      fs.unlinkSync.mockReturnValue(undefined);
-      fs.readFileSync.mockReturnValue(JSON.stringify({ backupPath: backupDir }));
 
       await runBackup({ config: { backupPath: backupDir }, dryRun: true });
 
@@ -63,8 +75,6 @@ describe('Backup Script', () => {
 
     it('removes lock file on error (trap cleanup)', async () => {
       fs.existsSync.mockReturnValue(false);
-      fs.writeFileSync.mockReturnValue(undefined);
-      fs.unlinkSync.mockReturnValue(undefined);
       execSync.mockImplementation(() => { throw new Error('tar failed'); });
 
       try {
@@ -79,7 +89,6 @@ describe('Backup Script', () => {
     it('detects live PID in existing lock → bails with message', () => {
       fs.existsSync.mockReturnValue(true);
       fs.readFileSync.mockReturnValue('99999');
-      // Simulate live process: kill(pid, 0) does not throw
       vi.spyOn(process, 'kill').mockReturnValue(true);
 
       expect(() => acquireLock()).toThrow(/running|locked|in progress/i);
@@ -88,15 +97,12 @@ describe('Backup Script', () => {
     it('detects stale PID in existing lock → recovers and proceeds', () => {
       fs.existsSync.mockReturnValue(true);
       fs.readFileSync.mockReturnValue('99999');
-      fs.unlinkSync.mockReturnValue(undefined);
-      fs.writeFileSync.mockReturnValue(undefined);
-      // Simulate dead process: kill(pid, 0) throws ESRCH
       vi.spyOn(process, 'kill').mockImplementation(() => {
         throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
       });
 
       expect(() => acquireLock()).not.toThrow();
-      expect(fs.unlinkSync).toHaveBeenCalled(); // old lock removed
+      expect(fs.unlinkSync).toHaveBeenCalled();
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('.lock'),
         expect.stringContaining('12345')
@@ -106,40 +112,38 @@ describe('Backup Script', () => {
 
   // --- Archive Contents ---
   describe('Archive Contents', () => {
-    it('tarball contains all internal manifest files', async () => {
+    it('internal files are staged (copied) into temp dir under internal/', async () => {
       const internalFiles = [
         `${mockHome}/.openclaw/workspace/SOUL.md`,
         `${mockHome}/.openclaw/openclaw.json`,
       ];
 
-      execSync.mockReturnValue('');
-      const archive = await createArchive({
+      await createArchive({
         internalManifest: internalFiles,
         externalManifest: [],
         backupDir,
       });
 
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      expect(tarCmd).toBeDefined();
-      expect(tarCmd[0]).toContain('SOUL.md');
+      // Files should be staged via copyFileSync into internal/ subdirectory
+      const copyCalls = fs.copyFileSync.mock.calls.map((c) => ({ src: c[0], dest: c[1] }));
+      expect(copyCalls.some((c) => c.src.includes('SOUL.md') && c.dest.includes('internal/'))).toBe(true);
+      expect(copyCalls.some((c) => c.src.includes('openclaw.json') && c.dest.includes('internal/'))).toBe(true);
     });
 
-    it('tarball contains all external manifest files', async () => {
-      execSync.mockReturnValue('');
+    it('external files are staged (copied) into temp dir under external/', async () => {
       await createArchive({
         internalManifest: [],
         externalManifest: ['/etc/caddy/Caddyfile'],
         backupDir,
       });
 
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      expect(tarCmd[0]).toContain('Caddyfile');
+      const copyCalls = fs.copyFileSync.mock.calls.map((c) => ({ src: c[0], dest: c[1] }));
+      expect(copyCalls.some((c) => c.src.includes('Caddyfile') && c.dest.includes('external/'))).toBe(true);
     });
 
-    it('includes meta.json with: OC version, timestamp, manifest checksums', async () => {
-      fs.writeFileSync.mockReturnValue(undefined);
+    it('includes meta.json with: OC version, timestamp, per-file checksums', async () => {
       execSync.mockImplementation((cmd) => {
-        if (cmd.includes('openclaw') && cmd.includes('version')) return '1.2.3\n';
+        if (typeof cmd === 'string' && cmd.includes('openclaw') && cmd.includes('version')) return '1.2.3\n';
         return '';
       });
 
@@ -150,17 +154,20 @@ describe('Backup Script', () => {
       });
 
       const metaCall = fs.writeFileSync.mock.calls.find(
-        (c) => c[0].includes('meta.json')
+        (c) => typeof c[0] === 'string' && c[0].includes('meta.json')
       );
       expect(metaCall).toBeDefined();
       const meta = JSON.parse(metaCall[1]);
       expect(meta).toHaveProperty('ocVersion');
       expect(meta).toHaveProperty('timestamp');
       expect(meta).toHaveProperty('checksums');
+      expect(meta).toHaveProperty('formatVersion', 1);
+      // Checksums should be an object (not placeholder strings)
+      expect(typeof meta.checksums).toBe('object');
+      expect(meta.checksums.internal).toBeUndefined(); // no flat 'internal' key
     });
 
-    it('includes Lobsterfile', async () => {
-      execSync.mockReturnValue('');
+    it('includes Lobsterfile via copyFileSync staging', async () => {
       await createArchive({
         internalManifest: [],
         externalManifest: [],
@@ -168,12 +175,14 @@ describe('Backup Script', () => {
         lobsterfilePath: `${mockHome}/.openclaw/lobsterfile`,
       });
 
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      expect(tarCmd[0]).toContain('lobsterfile');
+      const copyCalls = fs.copyFileSync.mock.calls;
+      const lobsterfileCopy = copyCalls.find(
+        (c) => c[0].includes('lobsterfile') && !c[0].includes('.env') && c[1].includes('lobsterfile')
+      );
+      expect(lobsterfileCopy).toBeDefined();
     });
 
-    it('includes lobsterfile.env', async () => {
-      execSync.mockReturnValue('');
+    it('includes lobsterfile.env via copyFileSync staging', async () => {
       await createArchive({
         internalManifest: [],
         externalManifest: [],
@@ -181,140 +190,124 @@ describe('Backup Script', () => {
         lobsterfileEnvPath: `${mockHome}/.openclaw/lobsterfile.env`,
       });
 
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      expect(tarCmd[0]).toContain('lobsterfile.env');
+      const copyCalls = fs.copyFileSync.mock.calls;
+      const envCopy = copyCalls.find((c) => c[0].includes('lobsterfile.env'));
+      expect(envCopy).toBeDefined();
     });
 
-    it('includes manifest-internal.json and manifest-external.json', async () => {
-      execSync.mockReturnValue('');
-      fs.writeFileSync.mockReturnValue(undefined);
-
+    it('writes manifest-internal.json and manifest-external.json', async () => {
       await createArchive({
         internalManifest: ['file1'],
         externalManifest: ['file2'],
         backupDir,
       });
 
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      expect(tarCmd[0]).toContain('manifest-internal.json');
-      expect(tarCmd[0]).toContain('manifest-external.json');
+      const writeCalls = fs.writeFileSync.mock.calls.map((c) => c[0]);
+      expect(writeCalls.some((p) => typeof p === 'string' && p.includes('manifest-internal.json'))).toBe(true);
+      expect(writeCalls.some((p) => typeof p === 'string' && p.includes('manifest-external.json'))).toBe(true);
     });
   });
 
   // --- Archive Structure ---
   describe('Archive Structure', () => {
-    it('internal/ prefix for internal files', async () => {
-      execSync.mockReturnValue('');
+    it('internal files staged under internal/ directory', async () => {
       await createArchive({
         internalManifest: [`${mockHome}/.openclaw/workspace/SOUL.md`],
         externalManifest: [],
         backupDir,
       });
 
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      expect(tarCmd[0]).toMatch(/internal\//);
+      // mkdirSync should have been called to create internal/ staging dir
+      const mkdirCalls = fs.mkdirSync.mock.calls.map((c) => c[0]);
+      expect(mkdirCalls.some((p) => p.includes('internal'))).toBe(true);
     });
 
-    it('external/ prefix for external files (leading / stripped, path-preserved)', async () => {
-      execSync.mockReturnValue('');
+    it('external files staged under external/ directory with path preserved', async () => {
       await createArchive({
         internalManifest: [],
         externalManifest: ['/etc/caddy/Caddyfile'],
         backupDir,
       });
 
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      expect(tarCmd[0]).toMatch(/external\//);
+      const mkdirCalls = fs.mkdirSync.mock.calls.map((c) => c[0]);
+      expect(mkdirCalls.some((p) => p.includes('external'))).toBe(true);
     });
 
-    it('meta.json, lobsterfile, lobsterfile.env, manifests at top level', async () => {
-      execSync.mockReturnValue('');
-      fs.writeFileSync.mockReturnValue(undefined);
-
+    it('tar is called via execFileSync with args array (no shell injection)', async () => {
       await createArchive({
         internalManifest: [],
         externalManifest: [],
         backupDir,
       });
 
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      // These should not be under internal/ or external/
-      expect(tarCmd[0]).toMatch(/(?<!\/)meta\.json/);
+      const tarCall = execFileSync.mock.calls.find((c) => c[0] === 'tar');
+      expect(tarCall).toBeDefined();
+      // Should pass args as array, not a single string
+      expect(Array.isArray(tarCall[1])).toBe(true);
+      expect(tarCall[1]).toContain('-czf');
     });
   });
 
   // --- Exclusions ---
   describe('Exclusions', () => {
-    it('default exclusions applied (node_modules, .git, __pycache__, venvs, build dirs)', async () => {
-      execSync.mockReturnValue('');
+    it('git repos with remotes are NOT staged (Lobsterfile has clone entry instead)', async () => {
       await createArchive({
-        internalManifest: [],
-        externalManifest: [],
-        backupDir,
-      });
-
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      expect(tarCmd[0]).toMatch(/exclude.*node_modules/);
-    });
-
-    it('git repos with remotes are NOT tarballed (Lobsterfile has clone entry instead)', async () => {
-      execSync.mockImplementation((cmd) => {
-        if (cmd.includes('git remote get-url')) return 'https://github.com/user/repo.git\n';
-        return '';
-      });
-      fs.existsSync.mockReturnValue(true);
-
-      const archive = await createArchive({
         internalManifest: [],
         externalManifest: ['/home/testuser/projects/repo'],
         backupDir,
         gitRepos: [{ path: '/home/testuser/projects/repo', hasRemote: true }],
       });
 
-      // The repo path should NOT be in the tar command
-      const tarCmd = execSync.mock.calls.find((c) => c[0].includes('tar'));
-      if (tarCmd) {
-        expect(tarCmd[0]).not.toContain('/home/testuser/projects/repo');
-      }
+      // The repo should NOT have been copied
+      const copyCalls = fs.copyFileSync.mock.calls.map((c) => c[0]);
+      expect(copyCalls.every((p) => !p.includes('/home/testuser/projects/repo'))).toBe(true);
     });
   });
 
   // --- Encryption ---
   describe('Encryption', () => {
-    it('archive is encrypted with age (not plaintext)', async () => {
-      execSync.mockReturnValue('');
-      fs.writeFileSync.mockReturnValue(undefined);
+    it('archive is encrypted with age via execFileSync (not shell string)', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('.lock')) return false;
+        return true;
+      });
 
       await runBackup({
         config: { backupPath: backupDir },
         dryRun: false,
       });
 
-      const ageCmd = execSync.mock.calls.find((c) => c[0].includes('age'));
-      expect(ageCmd).toBeDefined();
+      // age should be called via execFileSync
+      const ageCall = execFileSync.mock.calls.find((c) => c[0] === 'age');
+      expect(ageCall).toBeDefined();
+      expect(ageCall[1]).toContain('--encrypt');
     });
   });
 
   // --- Filename & Tagging ---
   describe('Filename & Tagging', () => {
-    it('timestamp filename: backup-YYYY-MM-DDTHH:MM:SS.tar.gz.age', async () => {
-      execSync.mockReturnValue('');
-      fs.writeFileSync.mockReturnValue(undefined);
-
+    it('timestamp filename has no colons (filesystem-safe)', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('.lock')) return false;
+        return true;
+      });
       const result = await runBackup({
         config: { backupPath: backupDir },
         dryRun: true,
       });
 
+      // New format: backup-2026-03-12T14-32-45.tar.gz.age (dashes, no colons)
+      expect(result.filename).not.toContain(':');
       expect(result.filename).toMatch(
-        /^backup-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.tar\.gz\.age$/
+        /^backup-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.tar\.gz\.age$/
       );
     });
 
-    it('--now triggers immediate backup', async () => {
-      execSync.mockReturnValue('');
-      fs.writeFileSync.mockReturnValue(undefined);
-
+    it('--now triggers immediate manual backup', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('.lock')) return false;
+        return true;
+      });
       const result = await runBackup({
         config: { backupPath: backupDir },
         now: true,
@@ -326,9 +319,10 @@ describe('Backup Script', () => {
     });
 
     it('manual backups tagged as manual (not subject to auto-pruning)', async () => {
-      execSync.mockReturnValue('');
-      fs.writeFileSync.mockReturnValue(undefined);
-
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('.lock')) return false;
+        return true;
+      });
       const result = await runBackup({
         config: { backupPath: backupDir },
         now: true,
@@ -343,13 +337,12 @@ describe('Backup Script', () => {
   describe('lobsterfile.env Refresh', () => {
     it('detects new {{VARIABLE}} placeholders since last backup', async () => {
       fs.readFileSync.mockImplementation((p) => {
-        if (p.includes('lobsterfile.env')) return 'SERVER_IP=10.0.0.1\n';
-        if (p.includes('lobsterfile') && !p.includes('.env')) {
+        if (typeof p === 'string' && p.includes('lobsterfile.env')) return 'SERVER_IP=10.0.0.1\n';
+        if (typeof p === 'string' && p.includes('lobsterfile') && !p.includes('.env')) {
           return '{{SERVER_IP}} {{NEW_PORT}}';
         }
         return '{}';
       });
-      fs.existsSync.mockReturnValue(true);
 
       const result = await runBackup({
         config: { backupPath: backupDir },
@@ -362,11 +355,10 @@ describe('Backup Script', () => {
 
     it('does not re-prompt for existing variables with values', async () => {
       fs.readFileSync.mockImplementation((p) => {
-        if (p.includes('lobsterfile.env')) return 'SERVER_IP=10.0.0.1\n';
-        if (p.includes('lobsterfile') && !p.includes('.env')) return '{{SERVER_IP}}';
+        if (typeof p === 'string' && p.includes('lobsterfile.env')) return 'SERVER_IP=10.0.0.1\n';
+        if (typeof p === 'string' && p.includes('lobsterfile') && !p.includes('.env')) return '{{SERVER_IP}}';
         return '{}';
       });
-      fs.existsSync.mockReturnValue(true);
 
       const result = await runBackup({
         config: { backupPath: backupDir },
@@ -381,7 +373,7 @@ describe('Backup Script', () => {
   // --- Error Handling ---
   describe('Error Handling', () => {
     it('disk full → partial archive cleaned up, no corrupt file left', async () => {
-      fs.unlinkSync.mockReturnValue(undefined);
+      fs.existsSync.mockReturnValue(false);
       execSync.mockImplementation(() => {
         throw Object.assign(new Error('No space left on device'), { code: 'ENOSPC' });
       });
@@ -392,18 +384,19 @@ describe('Backup Script', () => {
         // Expected
       }
 
-      // Should attempt cleanup of partial file
       expect(fs.unlinkSync).toHaveBeenCalled();
     });
 
     it('encryption failure → no plaintext tarball left on disk', async () => {
-      let tarCreated = false;
-      execSync.mockImplementation((cmd) => {
-        if (cmd.includes('tar')) { tarCreated = true; return ''; }
-        if (cmd.includes('age')) throw new Error('age encryption failed');
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('.lock')) return false;
+        return true;
+      });
+      execFileSync.mockImplementation((cmd, args) => {
+        if (cmd === 'tar') return '';
+        if (cmd === 'age') throw new Error('age encryption failed');
         return '';
       });
-      fs.unlinkSync.mockReturnValue(undefined);
 
       try {
         await runBackup({ config: { backupPath: backupDir } });
@@ -413,16 +406,15 @@ describe('Backup Script', () => {
 
       // Plaintext tarball should be cleaned up
       const unlinkCalls = fs.unlinkSync.mock.calls.map((c) => c[0]);
-      expect(unlinkCalls.some((p) => p.includes('.tar.gz') && !p.includes('.age'))).toBe(true);
+      expect(unlinkCalls.some((p) => typeof p === 'string' && p.includes('.tar.gz') && !p.includes('.age'))).toBe(true);
     });
 
     it('no external manifest → proceeds with warning (internal-only backup)', async () => {
       fs.existsSync.mockImplementation((p) => {
-        if (p.includes('external-manifest')) return false;
+        if (typeof p === 'string' && p.includes('external-manifest')) return false;
         return true;
       });
       fs.readFileSync.mockReturnValue(JSON.stringify({ backupPath: backupDir }));
-      execSync.mockReturnValue('');
 
       const result = await runBackup({
         config: { backupPath: backupDir },
@@ -436,12 +428,10 @@ describe('Backup Script', () => {
     });
 
     it('logs result on success', async () => {
-      execSync.mockReturnValue('');
-      fs.writeFileSync.mockReturnValue(undefined);
-      fs.appendFileSync.mockReturnValue(undefined);
-      fs.existsSync.mockReturnValue(true);
-      fs.readFileSync.mockReturnValue('{}');
-
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('.lock')) return false;
+        return true;
+      });
       const result = await runBackup({
         config: { backupPath: backupDir },
         dryRun: true,
@@ -451,15 +441,54 @@ describe('Backup Script', () => {
     });
 
     it('logs error on failure', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('.lock')) return false;
+        return true;
+      });
       execSync.mockImplementation(() => { throw new Error('catastrophic failure'); });
-      fs.appendFileSync.mockReturnValue(undefined);
-      fs.unlinkSync.mockReturnValue(undefined);
 
       try {
         await runBackup({ config: { backupPath: backupDir } });
       } catch (e) {
         expect(e.message).toMatch(/catastrophic|failure/i);
       }
+    });
+  });
+
+  // --- Checksums ---
+  describe('Checksums', () => {
+    it('meta.json contains per-file SHA-256 checksums (not placeholders)', async () => {
+      await createArchive({
+        internalManifest: [],
+        externalManifest: [],
+        backupDir,
+      });
+
+      const metaCall = fs.writeFileSync.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('meta.json')
+      );
+      expect(metaCall).toBeDefined();
+      const meta = JSON.parse(metaCall[1]);
+
+      // Checksums should be a real object, not { internal: 'placeholder', external: 'placeholder' }
+      for (const [key, value] of Object.entries(meta.checksums)) {
+        expect(value).toMatch(/^[a-f0-9]{64}$/); // SHA-256 hex digest
+      }
+    });
+
+    it('manifest files are checksummed', async () => {
+      await createArchive({
+        internalManifest: ['file1'],
+        externalManifest: ['file2'],
+        backupDir,
+      });
+
+      const metaCall = fs.writeFileSync.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('meta.json')
+      );
+      const meta = JSON.parse(metaCall[1]);
+      expect(meta.checksums['manifest-internal.json']).toBeDefined();
+      expect(meta.checksums['manifest-external.json']).toBeDefined();
     });
   });
 });

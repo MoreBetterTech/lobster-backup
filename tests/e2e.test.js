@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
@@ -30,15 +30,11 @@ describe('End-to-End Scenarios', () => {
     vi.restoreAllMocks();
   });
 
-  it('E2E-1: Full Round-Trip (Same Machine) — setup → backup → restore → all files present', async () => {
-    // This test will import and chain setup, backup, and restore
-    // For now, we define the expected flow and assertions
-
+  it('E2E-1: Full Round-Trip — setup → backup (dry) → restore (dry) exercises full orchestration', async () => {
     const { runSetup } = await import('../src/setup.js');
     const { runBackup } = await import('../src/backup.js');
     const { runRestore } = await import('../src/restore.js');
 
-    // Setup mocks for full flow
     fs.existsSync.mockReturnValue(false);
     fs.mkdirSync.mockReturnValue(undefined);
     fs.writeFileSync.mockReturnValue(undefined);
@@ -46,18 +42,19 @@ describe('End-to-End Scenarios', () => {
     fs.readdirSync.mockReturnValue([]);
     fs.unlinkSync.mockReturnValue(undefined);
     execSync.mockReturnValue('');
+    execFileSync.mockReturnValue('');
 
     const mockIO = {
       output: [],
       write(msg) { this.output.push(msg); },
       prompt: vi.fn()
-        .mockResolvedValueOnce('I have saved this key')  // recovery key ack
-        .mockResolvedValueOnce('y')                       // confirm setup
-        .mockResolvedValueOnce('y')                       // confirm restore
-        .mockResolvedValueOnce('y'),                      // confirm lobsterfile exec
+        .mockResolvedValueOnce('I have saved this key')
+        .mockResolvedValueOnce('y')
+        .mockResolvedValueOnce('y')
+        .mockResolvedValueOnce('y'),
     };
 
-    // 1. Setup
+    // 1. Setup — should write config with real Argon2id-wrapped keys
     await runSetup({
       io: mockIO,
       passphrase: 'my-secure-passphrase-2026',
@@ -67,20 +64,48 @@ describe('End-to-End Scenarios', () => {
       skipConfirmation: true,
     });
 
-    // 2. Backup
+    // Verify setup wrote a config with real wrapped keys (not placeholders)
+    const configWriteCall = fs.writeFileSync.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('lobster-backup.json')
+    );
+    expect(configWriteCall).toBeDefined();
+    const savedConfig = JSON.parse(configWriteCall[1]);
+    expect(savedConfig.vaultKeyWrappedPassphrase).toBeDefined();
+    expect(savedConfig.vaultKeyWrappedRecovery).toBeDefined();
+    expect(savedConfig.argon2Salt).toBeDefined();
+    // Passphrase hash should NOT be an unsalted SHA-256 (64 hex chars from SHA-256)
+    // With Argon2id it's also 64 hex chars but derived differently — we verify the 
+    // wrapped keys are real base64 strings of the right length
+    const wrappedKey = Buffer.from(savedConfig.vaultKeyWrappedPassphrase, 'base64');
+    expect(wrappedKey.length).toBe(60); // 12 IV + 32 encrypted + 16 auth tag
+
+    // 2. Backup (dry run)
     const backupResult = await runBackup({
       config: { backupPath: backupDir },
       dryRun: true,
     });
     expect(backupResult).toBeDefined();
+    expect(backupResult.success).toBe(true);
+    // Verify timestamp format has no colons
+    expect(backupResult.filename).not.toContain(':');
+    expect(backupResult.filename).toMatch(/backup-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}/);
 
-    // 3. Restore
+    // 3. Restore (dry run) — the real runRestore now needs a backup to select
+    // Mock a backup file existing
+    fs.readdirSync.mockReturnValue(['backup-2026-03-12T14-32-45.tar.gz.age']);
+    fs.statSync.mockReturnValue({ size: 1024 });
+    fs.existsSync.mockReturnValue(true);
+
     const restoreResult = await runRestore({
       config: { backupPath: backupDir },
       dryRun: true,
       io: mockIO,
     });
     expect(restoreResult).toBeDefined();
+    expect(restoreResult.dryRun).toBe(true);
+    expect(restoreResult.completed).toBe(true);
+    // Dry run should have written preview info to IO
+    expect(mockIO.output.some(msg => typeof msg === 'string' && msg.includes('Dry Run'))).toBe(true);
   });
 
   it('E2E-2: Cross-Machine Portability — env vars prompted for update', async () => {
@@ -93,27 +118,28 @@ describe('End-to-End Scenarios', () => {
       output: [],
       write(msg) { this.output.push(msg); },
       prompt: vi.fn()
-        .mockResolvedValueOnce('10.0.0.2')   // new IP
-        .mockResolvedValueOnce(''),            // keep port
+        .mockResolvedValueOnce('10.0.0.2')
+        .mockResolvedValueOnce(''),
     };
 
     const result = await substituteLobsterfile(lobsterfile, oldEnv, mockIO);
-
-    // Should have prompted for new values
     expect(mockIO.prompt).toHaveBeenCalled();
+    // The new IP should be substituted
+    expect(result).toContain('10.0.0.2');
+    // The unchanged port should keep its old value
+    expect(result).toContain('18789');
   });
 
   it('E2E-3: Partial / Idempotent Restore — already-done steps succeed', async () => {
     const { executeLobsterfile } = await import('../src/restore.js');
 
-    // Simulate idempotent commands that succeed even when already done
     execSync.mockReturnValue('');
     fs.writeFileSync.mockReturnValue(undefined);
     fs.unlinkSync.mockReturnValue(undefined);
 
     const idempotentScript = `#!/bin/bash
-sudo apt-get install -y curl   # already installed = no-op
-sudo apt-get install -y caddy  # already installed = no-op
+sudo apt-get install -y curl
+sudo apt-get install -y caddy
 `;
 
     const result = await executeLobsterfile({
@@ -124,29 +150,37 @@ sudo apt-get install -y caddy  # already installed = no-op
     expect(result.exitCode).toBe(0);
   });
 
-  it('E2E-4: Recovery Key Restore — decrypt with recovery key succeeds', async () => {
+  it('E2E-4: Recovery Key Restore — decryptBackup uses unwrap chain (not raw age passphrase)', async () => {
+    // This test verifies that decryptBackup actually calls the crypto chain
+    // rather than passing the passphrase directly to age
     const { decryptBackup } = await import('../src/restore.js');
 
-    execSync.mockReturnValue(Buffer.from('decrypted-archive'));
+    // We need to test that the function attempts to unwrap,
+    // not that it passes credentials to the shell.
+    // With invalid wrapped key data, it should fail at unwrap (not at age CLI).
+    await expect(
+      decryptBackup({
+        archivePath: '/backups/backup.tar.gz.age',
+        credentialType: 'recovery',
+        recoveryKey: Buffer.alloc(32, 0x01).toString('base64'),
+        config: {
+          // Invalid wrapped key (wrong length for AES-256-GCM: needs 60 bytes)
+          vaultKeyWrappedRecovery: Buffer.alloc(30, 0x02).toString('base64'),
+        },
+      })
+    ).rejects.toThrow(); // Should fail at unwrap, not at age CLI
 
-    const result = await decryptBackup({
-      archivePath: '/backups/backup.tar.gz.age',
-      credentialType: 'recovery',
-      recoveryKey: 'valid-recovery-key-base64',
-      config: {
-        vaultKeyWrappedRecovery: 'wrapped-key-data',
-      },
-    });
-
-    expect(result.success).toBe(true);
+    // The old implementation would have called execSync with 'age --decrypt'
+    // The new implementation should fail before reaching execSync/execFileSync
+    expect(execSync).not.toHaveBeenCalled();
+    expect(execFileSync).not.toHaveBeenCalled();
   });
 
   it('E2E-5: Stale Lock Recovery — dead PID lock detected, recovered, backup completes', async () => {
     const { acquireLock, runBackup } = await import('../src/backup.js');
 
-    // Stale lock exists
     fs.existsSync.mockReturnValue(true);
-    fs.readFileSync.mockReturnValue('99999'); // dead PID
+    fs.readFileSync.mockReturnValue('99999');
     fs.unlinkSync.mockReturnValue(undefined);
     fs.writeFileSync.mockReturnValue(undefined);
     vi.spyOn(process, 'kill').mockImplementation(() => {
@@ -154,11 +188,10 @@ sudo apt-get install -y caddy  # already installed = no-op
     });
     vi.spyOn(process, 'pid', 'get').mockReturnValue(12345);
 
-    // Should recover from stale lock
     expect(() => acquireLock()).not.toThrow();
 
-    // And backup should proceed
     execSync.mockReturnValue('');
+    execFileSync.mockReturnValue('');
     const result = await runBackup({
       config: { backupPath: backupDir },
       dryRun: true,
@@ -170,8 +203,8 @@ sudo apt-get install -y caddy  # already installed = no-op
     const { acquireLock } = await import('../src/backup.js');
 
     fs.existsSync.mockReturnValue(true);
-    fs.readFileSync.mockReturnValue('55555'); // live PID
-    vi.spyOn(process, 'kill').mockReturnValue(true); // process is alive
+    fs.readFileSync.mockReturnValue('55555');
+    vi.spyOn(process, 'kill').mockReturnValue(true);
 
     expect(() => acquireLock()).toThrow(/running|locked|in progress/i);
   });

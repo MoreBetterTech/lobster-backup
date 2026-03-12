@@ -8,7 +8,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { execSync, execFileSync } from 'node:child_process';
 import { decryptArchive, derivePassphraseKey, unwrapVaultKey } from './crypto.js';
 import { substituteVariables, parseEnvFile } from './lobsterfile-env.js';
 
@@ -21,9 +22,9 @@ export function listBackups(backupDir) {
   try {
     const files = fs.readdirSync(backupDir);
     
-    // Filter for backup-*.tar.gz.age files
+    // Filter for backup-*.tar.gz.age files (supports both colon and dash timestamps)
     const backupFiles = files.filter(file => 
-      /^backup-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.tar\.gz\.age$/.test(file)
+      /^backup-\d{4}-\d{2}-\d{2}T\d{2}[-:]\d{2}[-:]\d{2}\.tar\.gz\.age$/.test(file)
     );
     
     // Convert to backup objects with metadata
@@ -31,9 +32,17 @@ export function listBackups(backupDir) {
       const fullPath = path.join(backupDir, filename);
       const stats = fs.statSync(fullPath);
       
-      // Extract timestamp from filename
-      const timestampMatch = filename.match(/backup-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
-      const timestamp = timestampMatch ? new Date(timestampMatch[1]) : new Date(0);
+      // Extract timestamp from filename (convert dashes back to colons for Date parsing)
+      const timestampMatch = filename.match(/backup-(\d{4}-\d{2}-\d{2}T\d{2}[-:]\d{2}[-:]\d{2})/);
+      let timestamp;
+      if (timestampMatch) {
+        // Normalize separators: the time portion uses dashes in new format
+        const raw = timestampMatch[1];
+        const normalized = raw.replace(/T(\d{2})-(\d{2})-(\d{2})/, 'T$1:$2:$3');
+        timestamp = new Date(normalized);
+      } else {
+        timestamp = new Date(0);
+      }
       
       return {
         filename,
@@ -220,35 +229,64 @@ export async function promptForCredential(mockIO) {
  */
 export async function decryptBackup({ archivePath, credentialType, passphrase, recoveryKey, config }) {
   try {
-    let cmd;
-    
+    // Step 1: Unwrap the vault key using the provided credential
+    let vaultKey;
+
     if (credentialType === 'passphrase' && passphrase) {
-      // For the actual implementation, we would derive keys and unwrap
-      // For tests, we just need to call execSync with age command
-      cmd = `age --decrypt --passphrase ${archivePath}`;
+      // Passphrase path: derive wrapping key via Argon2id, then unwrap vault key
+      if (!config.argon2Salt || !config.vaultKeyWrappedPassphrase) {
+        throw new Error('Missing Argon2 salt or wrapped vault key in config');
+      }
+      const salt = Buffer.from(config.argon2Salt, 'base64');
+      const wrappingKey = await derivePassphraseKey(passphrase, salt);
+      const wrappedVaultKey = Buffer.from(config.vaultKeyWrappedPassphrase, 'base64');
+      vaultKey = await unwrapVaultKey(wrappedVaultKey, wrappingKey);
     } else if (credentialType === 'recovery' && recoveryKey) {
-      // For recovery key, use it as identity
-      cmd = `age --decrypt -i recovery-key ${archivePath}`;
+      // Recovery key path: use recovery key directly as wrapping key to unwrap vault key
+      if (!config.vaultKeyWrappedRecovery) {
+        throw new Error('Missing recovery-wrapped vault key in config');
+      }
+      const recoveryKeyBuffer = Buffer.from(recoveryKey, 'base64');
+      const wrappedVaultKey = Buffer.from(config.vaultKeyWrappedRecovery, 'base64');
+      vaultKey = await unwrapVaultKey(wrappedVaultKey, recoveryKeyBuffer);
     } else {
       throw new Error('Invalid credential type or missing credentials');
     }
-    
-    const result = execSync(cmd, { stdio: 'pipe' });
-    return { success: true, data: result };
-    
+
+    // Step 2: Write vault key as a temporary age identity file for decryption
+    const tmpIdentityPath = path.join(os.tmpdir(), `lobster-identity-${Date.now()}`);
+    try {
+      fs.writeFileSync(tmpIdentityPath, vaultKey.toString('base64'), { mode: 0o600 });
+
+      // Step 3: Decrypt archive using the vault key identity
+      const result = await decryptArchive({
+        inputPath: archivePath,
+        identityPath: tmpIdentityPath,
+      });
+      return { success: true, data: result };
+    } finally {
+      // Always clean up the temporary identity file — it contains key material
+      try { fs.unlinkSync(tmpIdentityPath); } catch { /* ignore */ }
+    }
+
   } catch (error) {
     const errorMsg = error.message.toLowerCase();
-    
+
+    // Check unwrap failures first — these mean wrong passphrase/recovery key
+    if (errorMsg.includes('failed to unwrap') || errorMsg.includes('corrupted data')) {
+      throw new Error('Wrong passphrase or recovery key provided');
+    }
     if (errorMsg.includes('no identity') || errorMsg.includes('matched')) {
       throw new Error('Wrong passphrase or recovery key provided');
     }
-    if (errorMsg.includes('header') || errorMsg.includes('invalid')) {
+    // Archive-level errors (age reports header issues)
+    if (errorMsg.includes('header is invalid')) {
       throw new Error('Archive is corrupted or has an invalid header');
     }
     if (errorMsg.includes('failed') || errorMsg.includes('incorrect')) {
       throw new Error('Decryption failed - check your credentials');
     }
-    
+
     throw error;
   }
 }
@@ -265,59 +303,71 @@ export async function decryptBackup({ archivePath, credentialType, passphrase, r
 export function restoreFiles({ archiveDir, internalFiles, externalFiles, symlinks, preservePermissions }) {
   const homeDir = os.homedir();
   const ocDir = path.join(homeDir, '.openclaw');
-  
+
+  /**
+   * Copy a file, optionally preserving its original permissions.
+   */
+  function copyFile(sourcePath, targetPath) {
+    const targetDir = path.dirname(targetPath);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    const content = fs.readFileSync(sourcePath);
+    fs.writeFileSync(targetPath, content);
+    if (preservePermissions) {
+      try {
+        const stats = fs.statSync(sourcePath);
+        fs.chmodSync(targetPath, stats.mode);
+      } catch { /* best-effort */ }
+    }
+  }
+
   // Restore internal files to ~/.openclaw/
   if (internalFiles && internalFiles.length > 0) {
     for (const relativePath of internalFiles) {
       const sourcePath = path.join(archiveDir, 'internal', relativePath);
       const targetPath = path.join(ocDir, relativePath);
-      
-      // Create parent directories
-      const targetDir = path.dirname(targetPath);
-      if (!fs.existsSync(targetDir)) {
-        fs.mkdirSync(targetDir, { recursive: true });
-      }
-      
-      // Copy file
-      const content = fs.readFileSync(sourcePath);
-      fs.writeFileSync(targetPath, content);
+      copyFile(sourcePath, targetPath);
     }
   }
-  
-  // Restore external files to their original absolute paths
+
+  // Restore external files to their original absolute paths.
+  // External manifest stores paths WITHOUT leading '/' (stripped during backup).
+  // We prepend '/' here to reconstruct the absolute path.
   if (externalFiles && externalFiles.length > 0) {
     for (const relativePath of externalFiles) {
       const sourcePath = path.join(archiveDir, 'external', relativePath);
-      const targetPath = path.join('/', relativePath); // Prepend / for absolute path
-      
-      // Use sudo for system paths
+      const targetPath = path.join('/', relativePath);
+
+      // Use sudo for system paths — avoids running entire restore as root
       if (targetPath.startsWith('/etc/') || targetPath.startsWith('/var/')) {
         const targetDir = path.dirname(targetPath);
-        execSync(`sudo mkdir -p "${targetDir}"`);
-        execSync(`sudo cp "${sourcePath}" "${targetPath}"`);
-      } else {
-        // Regular file copy
-        const targetDir = path.dirname(targetPath);
-        if (!fs.existsSync(targetDir)) {
-          fs.mkdirSync(targetDir, { recursive: true });
+        execFileSync('sudo', ['mkdir', '-p', targetDir], { stdio: 'pipe' });
+        execFileSync('sudo', ['cp', sourcePath, targetPath], { stdio: 'pipe' });
+        if (preservePermissions) {
+          try {
+            const stats = fs.statSync(sourcePath);
+            const mode = (stats.mode & 0o7777).toString(8);
+            execFileSync('sudo', ['chmod', mode, targetPath], { stdio: 'pipe' });
+          } catch { /* best-effort */ }
         }
-        const content = fs.readFileSync(sourcePath);
-        fs.writeFileSync(targetPath, content);
+      } else {
+        copyFile(sourcePath, targetPath);
       }
     }
   }
-  
+
   // Restore symlinks
   if (symlinks && symlinks.length > 0) {
     for (const symlink of symlinks) {
       const { linkPath, target } = symlink;
-      
+
       // Create parent directory
       const linkDir = path.dirname(linkPath);
       if (!fs.existsSync(linkDir)) {
         fs.mkdirSync(linkDir, { recursive: true });
       }
-      
+
       // Create symlink
       fs.symlinkSync(target, linkPath);
     }
@@ -468,6 +518,35 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
 }
 
 /**
+ * Compute SHA-256 checksums for all files in an extracted archive directory
+ * @param {string} extractDir - Directory containing extracted archive files
+ * @returns {Object} Map of relative file paths to their SHA-256 hex digests
+ */
+export function computeArchiveChecksums(extractDir) {
+  const checksums = {};
+
+  function walkDir(dir, prefix = '') {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walkDir(fullPath, relativePath);
+      } else if (entry.isFile()) {
+        // Skip meta.json itself — its checksums field can't include its own hash
+        if (relativePath === 'meta.json') continue;
+        const content = fs.readFileSync(fullPath);
+        const hash = createHash('sha256').update(content).digest('hex');
+        checksums[relativePath] = hash;
+      }
+    }
+  }
+
+  walkDir(extractDir);
+  return checksums;
+}
+
+/**
  * Main restore orchestration function
  * @param {Object} params - Restore parameters
  * @param {Object} params.config - Configuration object
@@ -475,20 +554,125 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
  * @param {Object} params.io - IO interface for user interaction
  * @returns {Promise<Object>} Restore result
  */
-export async function runRestore({ config, dryRun, io }) {
-  // This is the main orchestration function that would coordinate
-  // all the other functions in a real implementation
-  // For the tests, we just need it to return a defined object
-  
-  const result = {
-    restored: !dryRun,
-    dryRun: !!dryRun,
-    completed: true
-  };
-  
-  if (dryRun) {
-    result.preview = "Would restore backup archive with all components";
+export async function runRestore({ config, dryRun, io, from, credentialType, passphrase, recoveryKey }) {
+  // Step 1: Select backup
+  const selection = selectBackup(config.backupPath, { from });
+  if (!selection.selectedPath) {
+    throw new Error('No backup selected');
   }
-  
-  return result;
+  const archivePath = selection.selectedPath;
+  io.write(`Selected backup: ${path.basename(archivePath)}\n`);
+
+  // Step 2: Preflight checks
+  const installCheck = checkExistingInstall();
+  if (installCheck.existingInstall) {
+    io.write(`⚠️  ${installCheck.warning}\n`);
+    if (installCheck.offerBackup) {
+      const proceed = await io.prompt('Continue anyway? [y/n]: ');
+      if (proceed.toLowerCase() !== 'y') {
+        return { restored: false, cancelled: true };
+      }
+    }
+  }
+
+  // Step 3: Dry run preview
+  if (dryRun) {
+    io.write('=== Dry Run Preview ===\n');
+    io.write(`Archive: ${path.basename(archivePath)}\n`);
+    io.write('No changes will be made.\n');
+    return {
+      restored: false,
+      dryRun: true,
+      completed: true,
+      preview: `Would restore from ${path.basename(archivePath)}`
+    };
+  }
+
+  // Step 4: Decrypt backup using the vault key unwrapping chain
+  io.write('Decrypting backup archive...\n');
+  const decryptResult = await decryptBackup({
+    archivePath,
+    credentialType: credentialType || 'passphrase',
+    passphrase,
+    recoveryKey,
+    config,
+  });
+
+  // Step 5: Extract archive to temp directory
+  const extractDir = path.join(os.tmpdir(), `lobster-restore-${Date.now()}`);
+  fs.mkdirSync(extractDir, { recursive: true });
+
+  try {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('tar', ['-xzf', archivePath, '-C', extractDir], { stdio: 'pipe' });
+
+    // Step 6: Verify integrity via checksums in meta.json
+    const metaPath = path.join(extractDir, 'meta.json');
+    let meta = null;
+    if (fs.existsSync(metaPath)) {
+      meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    }
+
+    if (meta && meta.checksums) {
+      io.write('Verifying archive integrity...\n');
+      const archiveChecksums = computeArchiveChecksums(extractDir);
+      verifyArchiveIntegrity(meta, archiveChecksums);
+    }
+
+    // Step 7: Read manifests
+    const internalManifestPath = path.join(extractDir, 'manifest-internal.json');
+    const externalManifestPath = path.join(extractDir, 'manifest-external.json');
+    const internalFiles = fs.existsSync(internalManifestPath)
+      ? JSON.parse(fs.readFileSync(internalManifestPath, 'utf8'))
+      : [];
+    const externalFiles = fs.existsSync(externalManifestPath)
+      ? JSON.parse(fs.readFileSync(externalManifestPath, 'utf8'))
+      : [];
+
+    // Step 8: Restore files
+    io.write('Restoring files...\n');
+    restoreFiles({
+      archiveDir: extractDir,
+      internalFiles,
+      externalFiles,
+      preservePermissions: true,
+    });
+
+    // Step 9: Handle Lobsterfile
+    const lobsterfilePath = path.join(extractDir, 'lobsterfile');
+    if (fs.existsSync(lobsterfilePath)) {
+      const lobsterfileContent = fs.readFileSync(lobsterfilePath, 'utf8');
+
+      // Load env vars
+      const envFilePath = path.join(extractDir, 'lobsterfile.env');
+      let envVars = {};
+      if (fs.existsSync(envFilePath)) {
+        envVars = parseEnvFile(fs.readFileSync(envFilePath, 'utf8'));
+      }
+
+      // Prompt for variable updates
+      const substitutedContent = await substituteLobsterfile(lobsterfileContent, envVars, io);
+
+      // Display for review (unskippable)
+      const reviewResult = await displayLobsterfile(substitutedContent, io);
+      if (reviewResult.confirmed) {
+        io.write('Executing Lobsterfile...\n');
+        await executeLobsterfile({ content: lobsterfileContent, envVars, io });
+      } else {
+        io.write('Lobsterfile execution skipped by user.\n');
+      }
+    }
+
+    io.write('✅ Restore complete!\n');
+    return {
+      restored: true,
+      dryRun: false,
+      completed: true,
+      filesRestored: { internal: internalFiles.length, external: externalFiles.length },
+    };
+
+  } finally {
+    // Clean up extraction directory
+    try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 }

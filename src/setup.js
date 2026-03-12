@@ -65,15 +65,28 @@ export function generateRecoveryKey() {
 }
 
 /**
- * Hash passphrase using bcrypt for storage
+ * Hash passphrase for storage using Argon2id
+ * 
+ * Used for passphrase verification (is this the right passphrase?) without
+ * needing to attempt a full vault key unwrap. Argon2id is already used for
+ * key derivation in crypto.js — reusing it here avoids adding a weaker hash.
+ * 
  * @param {string} passphrase - Passphrase to hash
- * @returns {Promise<string>} Hashed passphrase
+ * @param {Buffer} salt - Salt for hashing (reuses the Argon2 salt from setup)
+ * @returns {Promise<string>} Hex-encoded Argon2id hash
  */
-async function hashPassphrase(passphrase) {
-  // Simple SHA-256 hash for now - in production would use bcrypt
-  const hash = crypto.createHash('sha256');
-  hash.update(passphrase);
-  return hash.digest('hex');
+async function hashPassphrase(passphrase, salt) {
+  const { default: argon2 } = await import('argon2');
+  const hash = await argon2.hash(passphrase, {
+    salt,
+    type: argon2.argon2id,
+    memoryCost: 65536,
+    timeCost: 3,
+    parallelism: 1,
+    hashLength: 32,
+    raw: true
+  });
+  return Buffer.from(hash).toString('hex');
 }
 
 /**
@@ -168,7 +181,7 @@ export async function runSetup(options) {
       daily: true
     },
     exclusions: [],
-    passphraseHash: await hashPassphrase(passphrase)
+    passphraseHash: await hashPassphrase(passphrase, salt)
   };
 
   writeConfig(config);
