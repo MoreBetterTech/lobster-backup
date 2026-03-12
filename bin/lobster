@@ -1,0 +1,218 @@
+#!/usr/bin/env node
+
+/**
+ * lobster — CLI entry point for lobster-backup
+ * 
+ * Routes subcommands (setup, scan, backup, restore) to their
+ * respective modules. This is the executable that gets linked
+ * into PATH via npm's "bin" field in package.json.
+ */
+
+import { parseArgs } from '../src/cli.js';
+import { runSetup } from '../src/setup.js';
+import { runBackup } from '../src/backup.js';
+import { readScanInputs, scanForFindings, presentFindings, registerFindings } from '../src/scan.js';
+import { runRestore } from '../src/restore.js';
+import readline from 'node:readline';
+
+// Build an IO interface for interactive prompts
+function createIO() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return {
+    write(msg) {
+      console.log(msg);
+    },
+    prompt(question) {
+      return new Promise((resolve) => {
+        rl.question(question, (answer) => {
+          resolve(answer);
+        });
+      });
+    },
+    close() {
+      rl.close();
+    },
+  };
+}
+
+function printHelp(unknownCommand) {
+  if (unknownCommand) {
+    console.log(`Unknown command: ${unknownCommand}\n`);
+  }
+  console.log(`🦞 lobster-backup — backup & restore for OpenClaw agents
+
+Usage:
+  lobster setup                  Initialize backup (passphrase, keys, config)
+  lobster scan [--paths ...]     Discover system files to include in backups
+  lobster scan --register        Register discovered files in external manifest
+  lobster backup                 Run a scheduled backup
+  lobster backup --now           Run an immediate manual backup
+  lobster backup --dry-run       Preview what would be backed up
+  lobster restore                Restore from most recent backup
+  lobster restore --from <path>  Restore from a specific backup file
+  lobster restore --list         List available backups
+  lobster restore --dry-run      Preview what would be restored
+  lobster --help                 Show this help message
+`);
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const { command, flags, unknownCommand } = parseArgs(args);
+
+  if (command === 'help' || flags.help) {
+    printHelp(unknownCommand === '--help' ? undefined : unknownCommand);
+    process.exit(unknownCommand && unknownCommand !== '--help' ? 1 : 0);
+  }
+
+  const io = createIO();
+
+  try {
+    switch (command) {
+      case 'setup': {
+        // Interactive setup — prompt for passphrase
+        const passphrase = await io.prompt('Enter backup passphrase (min 12 chars): ');
+        const confirm = await io.prompt('Confirm passphrase: ');
+        const backupPath = await io.prompt('Backup directory [~/lobster-backups]: ');
+
+        await runSetup({
+          io,
+          passphrase,
+          passphraseConfirm: confirm,
+          backupPath: backupPath.trim() || '~/lobster-backups',
+          skipScan: flags.skipScan || false,
+        });
+        break;
+      }
+
+      case 'scan': {
+        const inputs = readScanInputs();
+        const scanPaths = flags.paths || inputs.defaultPaths || ['/etc', '/var'];
+        const findings = scanForFindings(inputs, scanPaths);
+
+        presentFindings(findings);
+        io.write(`\nFound ${findings.length} file(s) relevant to OpenClaw.`);
+
+        if (flags.register) {
+          const paths = findings.map(f => f.path);
+          registerFindings(paths);
+          io.write('Registered files in external manifest.');
+        } else {
+          io.write('Run `lobster scan --register` to add them to the external manifest.');
+        }
+        break;
+      }
+
+      case 'backup': {
+        if (flags.list) {
+          // List backups (reuse restore's listBackups)
+          const { listBackups } = await import('../src/restore.js');
+          const os = await import('node:os');
+          const path = await import('node:path');
+          const fs = await import('node:fs');
+
+          const configPath = path.default.join(os.default.homedir(), '.openclaw', 'lobster-backup.json');
+          if (!fs.default.existsSync(configPath)) {
+            console.error('No lobster-backup config found. Run `lobster setup` first.');
+            process.exit(1);
+          }
+          const config = JSON.parse(fs.default.readFileSync(configPath, 'utf8'));
+          const backups = listBackups(config.backupPath);
+          if (backups.length === 0) {
+            io.write('No backups found.');
+          } else {
+            io.write(`Found ${backups.length} backup(s):\n`);
+            for (const b of backups) {
+              io.write(`  ${b.filename}  (${(b.size / 1024).toFixed(1)} KB)`);
+            }
+          }
+          break;
+        }
+
+        const result = await runBackup({
+          config: await loadConfig(),
+          dryRun: flags.dryRun || false,
+          now: flags.now || false,
+        });
+
+        if (flags.dryRun) {
+          io.write(`Dry run complete. Would create: ${result.filename}`);
+        } else {
+          io.write(`✅ Backup complete: ${result.filename}`);
+        }
+
+        if (result.warnings && result.warnings.length > 0) {
+          for (const w of result.warnings) {
+            io.write(`⚠️  ${w}`);
+          }
+        }
+        break;
+      }
+
+      case 'restore': {
+        if (flags.list) {
+          const { listBackups } = await import('../src/restore.js');
+          const config = await loadConfig();
+          const backups = listBackups(config.backupPath);
+          if (backups.length === 0) {
+            io.write('No backups found.');
+          } else {
+            io.write(`Found ${backups.length} backup(s):\n`);
+            for (const b of backups) {
+              io.write(`  ${b.filename}  (${(b.size / 1024).toFixed(1)} KB)`);
+            }
+          }
+          break;
+        }
+
+        // Prompt for passphrase
+        const credType = await io.prompt('Decrypt with (passphrase/recovery): ');
+        let passphrase, recoveryKey;
+
+        if (credType.trim().toLowerCase().startsWith('r')) {
+          recoveryKey = await io.prompt('Enter recovery key: ');
+        } else {
+          passphrase = await io.prompt('Enter backup passphrase: ');
+        }
+
+        const result = await runRestore({
+          config: await loadConfig(),
+          dryRun: flags.dryRun || false,
+          from: flags.from,
+          credentialType: credType.trim().toLowerCase().startsWith('r') ? 'recovery' : 'passphrase',
+          passphrase,
+          recoveryKey,
+          io,
+        });
+
+        if (result.cancelled) {
+          io.write('Restore cancelled.');
+        }
+        break;
+      }
+    }
+  } catch (error) {
+    console.error(`\n❌ Error: ${error.message}`);
+    process.exit(1);
+  } finally {
+    io.close();
+  }
+}
+
+async function loadConfig() {
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const fs = await import('node:fs');
+
+  const configPath = path.default.join(os.default.homedir(), '.openclaw', 'lobster-backup.json');
+  if (!fs.default.existsSync(configPath)) {
+    throw new Error('No lobster-backup config found. Run `lobster setup` first.');
+  }
+  return JSON.parse(fs.default.readFileSync(configPath, 'utf8'));
+}
+
+main();

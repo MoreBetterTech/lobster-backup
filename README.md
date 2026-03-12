@@ -52,10 +52,12 @@ lobster-backup does **not** install these prerequisites. If rebuilding from scra
 ### Install
 
 ```bash
+mkdir -p ~/.openclaw/skills
 cd ~/.openclaw/skills
 git clone https://github.com/MoreBetterTech/lobster-backup.git
 cd lobster-backup
 npm install
+npm link    # makes 'lobster' available on PATH
 ```
 
 ### First-Time Setup
