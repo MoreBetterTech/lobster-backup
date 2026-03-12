@@ -26,7 +26,9 @@ export function parseEnvFile(content) {
     const key = trimmed.slice(0, equalsIndex).trim();
     const value = trimmed.slice(equalsIndex + 1); // Don't trim value to preserve spaces
     
-    // Validate variable name - must be [A-Z_][A-Z0-9_]*
+    // Strict variable names [A-Z_][A-Z0-9_]*: Prevents injection via variable 
+    // names. If we allowed arbitrary characters, a variable name containing 
+    // shell metacharacters could be a vector when substituted into bash.
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) {
       throw new Error(`Invalid variable name: ${key}. Must match [A-Z_][A-Z0-9_]*`);
     }
@@ -46,6 +48,9 @@ export function parseEnvFile(content) {
 export function substituteVariables(template, variables) {
   // Replace {{VARIABLE_NAME}} with values
   // Only replace if the content inside braces is a valid variable name
+  // Missing variable throws, not silently skips: A Lobsterfile with 
+  // {{GATEWAY_PORT}} that substitutes to nothing would produce 
+  // `reverse_proxy localhost:` — a broken config deployed with sudo. Fail loudly.
   const result = template.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g, (match, variableName) => {
     if (!(variableName in variables)) {
       throw new Error(`Missing variable: ${variableName}`);
@@ -64,7 +69,8 @@ export function substituteVariables(template, variables) {
 export function writeEnvFile(envFilePath, variables) {
   let content = '';
   
-  // Preserve existing comments if file exists
+  // Preserve comments when writing: Users annotate their env files. 
+  // Blowing away comments on every write is hostile.
   if (fs.existsSync(envFilePath)) {
     const existing = fs.readFileSync(envFilePath, 'utf-8');
     const lines = existing.split('\n');

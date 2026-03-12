@@ -61,7 +61,9 @@ function walkDirectory(dir, exclusions = []) {
       const fullPath = path.join(dir, entry.name);
       
       if (entry.isDirectory()) {
-        // Don't traverse excluded directories
+        // Don't traverse excluded directories: Performance. Walking into 
+        // node_modules/ on a large project can take seconds and find nothing 
+        // useful. Exclude at the directory level, not the file level.
         if (!isExcluded(fullPath + '/', exclusions)) {
           files.push(...walkDirectory(fullPath, exclusions));
         }
@@ -150,7 +152,9 @@ export function readExternalManifest() {
 export function registerExternalPath(pathToRegister) {
   const ocDir = path.join(os.homedir(), '.openclaw');
   
-  // Reject internal paths
+  // Reject internal paths in external manifest: Prevents double-backup and 
+  // confusion. Internal files are always backed up. Registering them 
+  // externally would create ambiguous restore behavior.
   if (pathToRegister.includes(ocDir)) {
     throw new Error('Cannot register internal OpenClaw path as external');
   }
@@ -205,7 +209,9 @@ export function detectGitRepo(dirPath) {
       result.remoteUrl = null;
     }
     
-    // Get current ref (branch name or commit SHA)
+    // Git repo detection: detached HEAD → commit SHA. If someone is on a 
+    // detached HEAD, pinning to the branch name would be wrong (there isn't 
+    // one). The commit SHA is the only correct ref.
     try {
       // First, check if we're in detached HEAD state
       try {
@@ -261,13 +267,18 @@ export function generateGitCloneEntry(gitInfo) {
 
 /**
  * Resolve symlink handling
+ * 
+ * Symlinks preserved by default: A symlink IS semantic information — it says 
+ * "this is an alias." Dereferencing loses that. But warn if the target isn't 
+ * in the backup, because a dangling symlink after restore is useless.
+ * 
  * @param {string} linkPath - Path to symlink
  * @param {object} options - Options for symlink handling
  * @returns {object} Symlink resolution result
  */
 export function resolveSymlinks(linkPath, options = {}) {
   const result = {
-    preserveSymlink: true,
+    preserveSymlink: true, // Preserve semantic information by default
     target: null,
     warning: null
   };

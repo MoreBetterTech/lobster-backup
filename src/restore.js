@@ -107,6 +107,9 @@ export function checkOCVersion({ backupVersion, currentVersion }) {
     const c = current[i] || 0;
     
     if (b > c) {
+      // Version check: newer backup on older OC warns but doesn't block. 
+      // The user might be restoring to an older machine intentionally. 
+      // Hard-blocking would make disaster recovery harder. Warn and let them decide.
       return {
         warning: `This backup was created with OpenClaw ${backupVersion}. You are running ${currentVersion}. We recommend updating OpenClaw first.`,
         promptRequired: true
@@ -323,6 +326,11 @@ export function restoreFiles({ archiveDir, internalFiles, externalFiles, symlink
 
 /**
  * Display Lobsterfile content for user review
+ * 
+ * Lobsterfile review is unskippable: A Lobsterfile is a bash script with 
+ * embedded sudo commands. Executing it without review would be like running 
+ * `curl | sudo bash` — the user MUST have the opportunity to read it.
+ * 
  * @param {string} content - Lobsterfile content
  * @param {Object} mockIO - IO interface
  * @returns {Promise<Object>} User confirmation result
@@ -400,9 +408,15 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
   const failures = [];
   let exitCode = 0;
   
+  // sudo inline, not run-as-root: The restore script runs as regular user. 
+  // sudo in the Lobsterfile provides per-command privilege escalation with 
+  // syslog audit trail. Running the entire restore as root violates 
+  // least-privilege and removes the audit benefit.
   try {
     if (continueOnError) {
-      // Execute line by line, collecting failures
+      // --continue-on-error as opt-in: For experienced users who know which 
+      // steps are independent and want to batch through failures. Not the 
+      // default because it requires judgment.
       const lines = substitutedContent.split('\n').filter(line => 
         line.trim() && !line.trim().startsWith('#')
       );
@@ -422,7 +436,10 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
         exitCode = 1;
       }
     } else {
-      // Execute entire script at once
+      // fail-fast default for Lobsterfile execution: A failed step early in 
+      // the script likely means subsequent steps will fail too (e.g., if apt 
+      // install fails, the service that depends on it won't start). Continuing 
+      // wastes time and potentially leaves the system in a worse state.
       execSync(`bash ${tempPath}`, { stdio: 'pipe' });
     }
   } catch (error) {
@@ -431,7 +448,9 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
       throw error;
     }
   } finally {
-    // Clean up temp file
+    // Temp file cleanup after Lobsterfile execution: The substituted script 
+    // contains real commands with real values (IPs, domains, ports). Leaving 
+    // it in /tmp is an information leak.
     fs.unlinkSync(tempPath);
   }
   

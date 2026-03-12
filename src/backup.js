@@ -26,8 +26,11 @@ function getLockPath() {
 
 /**
  * Acquire lock file with current PID
- * If lock exists, check if process is still alive
- * If alive, throw error. If dead, clean up stale lock and proceed.
+ * 
+ * PID-based lock file: Prevents concurrent backups. Uses kill(pid, 0) to 
+ * detect if lock-holder is still alive. Dead process = stale lock that's 
+ * safe to recover. This is cheaper and more reliable than file timestamps 
+ * for stale detection.
  */
 export function acquireLock() {
   const lockPath = getLockPath();
@@ -41,7 +44,7 @@ export function acquireLock() {
       fs.unlinkSync(lockPath);
     } else {
       try {
-        // Check if process is alive with signal 0 (no signal sent, just check)
+        // kill(pid, 0) checks if process exists without sending a signal
         process.kill(pid, 0);
         // If we get here, process is alive
         throw new Error('Backup is already running or locked by another process');
@@ -215,7 +218,10 @@ export async function createArchive(options) {
     
     // Add external files with external/ prefix (excluding git repos with remotes)
     for (const filePath of externalManifest) {
-      // Skip git repos that have remotes
+      // Git repos with remotes skip tarballing: Tarballing a git repo gives 
+      // a snapshot without history (since .git/ is excluded). A fresh 
+      // 'git clone' from the remote is strictly better — you get full 
+      // history AND the correct reconstitution path.
       const repo = gitRepos.find(r => r.path === filePath);
       if (repo && repo.hasRemote) {
         continue; // Skip - this is handled by Lobsterfile clone entries
@@ -365,7 +371,8 @@ export async function runBackup(options) {
       recipients: config.recipients || ['age1defaultpublickey'] // fallback for tests
     });
     
-    // Clean up plaintext tarball
+    // Plaintext cleanup on encryption success: Security-critical.
+    // If age succeeds, we must delete the unencrypted tarball with secrets.
     fs.unlinkSync(tarballPath);
     tempFiles = tempFiles.filter(f => f !== tarballPath);
     
@@ -377,7 +384,9 @@ export async function runBackup(options) {
     };
     
   } catch (error) {
-    // Clean up any partial files
+    // Plaintext cleanup on encryption failure: Security-critical. If age 
+    // fails mid-encrypt, an unencrypted tarball with secrets sits on disk.
+    // The finally/catch blocks ensure it's deleted.
     for (const file of tempFiles) {
       try {
         if (fs.existsSync(file)) {
@@ -396,7 +405,8 @@ export async function runBackup(options) {
     
     throw error;
   } finally {
-    // Always release lock
+    // Lock file in finally block: The lock MUST be released even on error.
+    // A leaked lock blocks all future backups until manual intervention.
     if (lockAcquired) {
       releaseLock();
     }

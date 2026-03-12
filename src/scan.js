@@ -1,8 +1,10 @@
 /**
  * Lobster Scan - System File Scanner
  * 
- * Scans system locations for files likely related to the OpenClaw environment
- * and helps users register relevant ones in the external manifest.
+ * Heuristic, not audit: scan doesn't guarantee coverage. It catches the 
+ * common cases — reverse proxy configs, systemd units, tool configs. 
+ * Humans install things the agent never touched; scan is the safety net 
+ * for those.
  */
 
 import fs from 'node:fs';
@@ -22,7 +24,8 @@ export function readScanInputs() {
   let workspacePath = path.join(home, '.openclaw', 'workspace');  // default
   let warning = null;
   
-  // Try to read openclaw.json
+  // Reads openclaw.json for port: The gateway port is the strongest grep signal. 
+  // If Caddy/nginx is proxying to localhost:18789, that's almost certainly OC-related.
   if (fs.existsSync(openclawJsonPath)) {
     try {
       const config = JSON.parse(fs.readFileSync(openclawJsonPath, 'utf8'));
@@ -137,7 +140,9 @@ function scanDirectory(dirPath, inputs, findings) {
         }
       } catch (error) {
         if (error.code === 'EACCES') {
-          // Skip files we can't access, but warn
+          // EACCES skip with warning: On a multi-user server, some /etc/ files 
+          // are root-only. Crashing on permission denied would make scan useless. 
+          // Skip and warn so the user knows.
           console.warn(`Warning: Permission denied reading ${fullPath}, skipping`);
           continue;
         }

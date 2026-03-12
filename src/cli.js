@@ -21,7 +21,8 @@ export function parseArgs(args) {
   const flags = {};
   let unknownCommand = undefined;
   
-  // Check if command is valid
+  // Unknown command → help, not error: More helpful than a stack trace.
+  // Include the unknown command name so the user knows what they mistyped.
   if (!validCommands.includes(command)) {
     return {
       command: 'help',
@@ -47,7 +48,8 @@ export function parseArgs(args) {
         break;
         
       case '--paths':
-        // Collect all arguments after --paths until next flag or end
+        // --paths collects until next flag: Allows `--paths /etc /var/www /custom` 
+        // naturally. Stops at the next `--` flag so it's composable with other options.
         flags.paths = [];
         i++;
         while (i < args.length && !args[i].startsWith('--')) {

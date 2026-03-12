@@ -1,7 +1,10 @@
 /**
  * pruning.js — Backup retention and pruning functionality
  * 
- * Implements tier-based pruning with hourly and daily retention policies.
+ * 24 hourly + 7 daily: Sean's proposal. Hourly covers "I broke something 
+ * an hour ago." 7-day daily covers "something went wrong and I didn't notice 
+ * for days." Beyond 7 days, versioned backup value drops steeply. Storage 
+ * is cheap (~31 archives, under 2GB worst case).
  */
 
 import fs from 'node:fs';
@@ -30,11 +33,14 @@ export function pruneBackups(backups, options = {}) {
     };
   }
   
-  // Separate manual backups (never pruned)
+  // Manual backups never pruned: --now backups are explicit user intent.
+  // Auto-pruning them would violate that intent.
   const manualBackups = backups.filter(backup => backup.manual);
   const automaticBackups = backups.filter(backup => !backup.manual);
   
-  // Sort automatic backups by timestamp (newest first)
+  // Oldest-first pruning: Deterministic. The user can predict which 
+  // archive gets deleted. Random pruning would be chaos.
+  // (Sort newest first to keep recent ones, prune oldest)
   automaticBackups.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   
   const kept = [...manualBackups]; // Manual backups are always kept

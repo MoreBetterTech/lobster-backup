@@ -25,6 +25,11 @@ export function appendToLobsterfile(lobsterfilePath, content) {
 
 /**
  * Validate Lobsterfile is syntactically valid bash
+ * 
+ * bash -n validation: Cheap syntax check before execution. Catches obvious 
+ * errors (unclosed quotes, mismatched brackets) without running anything. 
+ * This is the last gate before the Lobsterfile gets sudo powers.
+ * 
  * @param {string} content - Lobsterfile content to validate
  * @returns {object} Validation result { valid: boolean, error?: string }
  */
@@ -62,7 +67,9 @@ export function detectPlaceholders(content) {
   while ((match = placeholderRegex.exec(content)) !== null) {
     const variableName = match[1];
     
-    // Check for empty placeholder {{}}
+    // Empty {{}} is an error: A malformed placeholder should be caught at 
+    // validation time, not silently ignored during substitution where it 
+    // would produce broken commands.
     if (!variableName) {
       throw new Error('Empty placeholder {{}} found - malformed variable');
     }
