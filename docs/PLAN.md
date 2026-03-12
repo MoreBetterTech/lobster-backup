@@ -99,6 +99,9 @@ systemctl reload caddy
 
 When the Lobsterfile bash script runs, `{{VARIABLE}}` placeholders are substituted from `lobsterfile.env` before execution.
 
+**Symlinks in the Lobsterfile/external manifest:**
+Preserve symlinks as symlinks in the backup archive — do not dereference by default. `tar` preserves symlink structure correctly out of the box. On restore, the symlink is restored as a symlink; the target must be present (either restored from the same backup or already on the system). If a symlink target is not found in the backup manifest, warn at backup time: `⚠ Symlink /etc/nginx/sites-enabled/mysite → target not in backup`. Optional `--dereference` flag for flattened-copy behavior.
+
 **On restore — same environment:**
 Values from `lobsterfile.env` are used as-is. No prompts, no changes needed.
 
@@ -370,6 +373,8 @@ Runs periodically (cron) or on demand:
 5. Push to destination
 6. Log result
 
+**Concurrency:** Write a lock file at `~/.openclaw/lobster-backup.lock` containing the current PID before starting. On startup, check for an existing lock: if the PID is still running, exit with a clear message ("backup already in progress, PID XXXX"); if the PID is dead (stale lock), remove it and proceed. Remove the lock on exit (including on error — use a trap).
+
 Pre-flight checks before every run:
 - Destination still configured and reachable
 - Destination is not public (re-verify)
@@ -405,6 +410,8 @@ Restore sequence:
 5. Prompt for environment variable review (see Lobsterfile Variables)
 6. Offer to display Lobsterfile for review before executing — **always offer this**; a Lobsterfile contains `sudo` commands and the user should have the opportunity to read it
 7. Execute Lobsterfile bash script (runs as current user; `sudo` prefixes handle privilege escalation inline)
+   - **Default: fail-fast** — stop at first error. Lobsterfile steps often have dependencies (install → configure → start); continuing past a failed install produces cascading meaningless failures.
+   - **`--continue-on-error` flag** — run all steps, collect all failures, report a complete failure list at the end. Use for diagnosis ("show me everything broken, not just the first thing"). Always report failures clearly regardless of mode.
 8. Print next steps:
    - Restart OC gateway
    - Verify services are running
