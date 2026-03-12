@@ -102,6 +102,20 @@ async function hashPassphrase(passphrase, salt) {
 export async function runSetup(options) {
   const { io, passphrase, passphraseConfirm, backupPath, skipScan, skipConfirmation } = options;
   
+  // 0. Check prerequisites
+  try {
+    execSync('which age', { stdio: 'pipe' });
+  } catch {
+    throw new Error(
+      'age is not installed. lobster-backup requires age for encryption.\n\n' +
+      'Install it:\n' +
+      '  Ubuntu/Debian: sudo apt-get install -y age\n' +
+      '  macOS:         brew install age\n' +
+      '  Other:         https://github.com/FiloSottile/age#installation\n\n' +
+      'Then run `lobster setup` again.'
+    );
+  }
+
   // 1. Check for existing config
   const configPath = path.join(os.homedir(), '.openclaw', 'lobster-backup.json');
   if (fs.existsSync(configPath)) {
@@ -189,15 +203,30 @@ export async function runSetup(options) {
   // Does NOT auto-modify AGENTS.md: Skills should not auto-modify core agent 
   // files. The snippet is printed; the human decides. This is a trust boundary.
   io.write('\n✅ Lobster backup has been configured successfully!');
-  io.write('\n📝 **Next Step: Update AGENTS.md**');
-  io.write('Add the following section to your AGENTS.md file:');
   io.write('');
-  io.write('## Lobsterfile Maintenance (lobster-backup)');
-  io.write('Whenever a prompt leads you to make any change to the system environment —');
-  io.write('installing a package, enabling a service, creating a user, modifying a config');
-  io.write('file outside the workspace, registering an external dependency — you MUST');
-  io.write('append the corresponding step(s) to the Lobsterfile before considering the');
-  io.write('task complete. Same obligation as updating MEMORY.md.');
+  io.write('╔══════════════════════════════════════════════════════════════════╗');
+  io.write('║                     ⚠️  REQUIRED NEXT STEPS                     ║');
+  io.write('╠══════════════════════════════════════════════════════════════════╣');
+  io.write('║                                                                  ║');
+  io.write('║  1. Run `lobster scan --register` to discover and register       ║');
+  io.write('║     system files (Caddy configs, systemd units, etc.)            ║');
+  io.write('║     Without this, backups only include ~/.openclaw/              ║');
+  io.write('║                                                                  ║');
+  io.write('║  2. Add this to your AGENTS.md:                                  ║');
+  io.write('║                                                                  ║');
+  io.write('║     ## Lobsterfile Maintenance (lobster-backup)                  ║');
+  io.write('║     Whenever a prompt leads you to make any change to the        ║');
+  io.write('║     system environment — installing a package, enabling a        ║');
+  io.write('║     service, creating a user, modifying a config file outside    ║');
+  io.write('║     the workspace, registering an external dependency — you      ║');
+  io.write('║     MUST append the corresponding step(s) to the Lobsterfile     ║');
+  io.write('║     before considering the task complete. Same obligation as     ║');
+  io.write('║     updating MEMORY.md.                                          ║');
+  io.write('║                                                                  ║');
+  io.write('║  Backups without scan = workspace only. No system configs.       ║');
+  io.write('║  Backups without AGENTS.md update = Lobsterfile won\'t grow.     ║');
+  io.write('║                                                                  ║');
+  io.write('╚══════════════════════════════════════════════════════════════════╝');
   io.write('');
 }
 
