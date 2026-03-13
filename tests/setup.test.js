@@ -314,7 +314,8 @@ describe('Setup Script', () => {
         write(msg) { this.output.push(msg); },
         prompt: vi.fn()
           .mockResolvedValueOnce('I have saved this key')
-          .mockResolvedValueOnce('y'),
+          .mockResolvedValueOnce('y')
+          .mockResolvedValueOnce('n'),  // AGENTS.md prompt
       };
 
       fs.existsSync.mockReturnValue(false);
@@ -379,18 +380,98 @@ describe('Setup Script', () => {
       }
     });
 
-    it('prints AGENTS.md snippet (does NOT auto-modify AGENTS.md)', async () => {
+    it('offers to add Lobsterfile instructions to AGENTS.md (writes on confirm)', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('AGENTS.md')) return true;
+        if (typeof p === 'string' && p.includes('lobster-backup.json')) return false;
+        return false;
+      });
+      fs.readFileSync.mockReturnValue('# AGENTS.md\n'); // no existing Lobsterfile section
+      fs.mkdirSync.mockReturnValue(undefined);
+      fs.writeFileSync.mockReturnValue(undefined);
+      fs.appendFileSync.mockReturnValue(undefined);
+
+      const mockIO = {
+        output: [],
+        write(msg) { this.output.push(msg); },
+        prompt: vi.fn()
+          .mockResolvedValueOnce('I have saved this key')  // recovery key ack
+          .mockResolvedValueOnce('y')                       // activate
+          .mockResolvedValueOnce('y'),                      // add to AGENTS.md
+      };
+
+      await runSetup({
+        io: mockIO,
+        passphrase: 'a-valid-passphrase-here-now',
+        passphraseConfirm: 'a-valid-passphrase-here-now',
+        backupPath: tmpDir,
+        skipScan: true,
+      });
+
+      // Should have appended Lobsterfile Maintenance to AGENTS.md
+      const agentsAppend = fs.appendFileSync.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('AGENTS.md')
+      );
+      expect(agentsAppend).toBeDefined();
+      expect(agentsAppend[1]).toMatch(/Lobsterfile Maintenance/);
+    });
+
+    it('does not modify AGENTS.md when user declines', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('AGENTS.md')) return true;
+        if (typeof p === 'string' && p.includes('lobster-backup.json')) return false;
+        return false;
+      });
+      fs.readFileSync.mockReturnValue('# AGENTS.md\n');
+      fs.mkdirSync.mockReturnValue(undefined);
+      fs.writeFileSync.mockReturnValue(undefined);
+      fs.appendFileSync.mockReturnValue(undefined);
+
+      const mockIO = {
+        output: [],
+        write(msg) { this.output.push(msg); },
+        prompt: vi.fn()
+          .mockResolvedValueOnce('I have saved this key')
+          .mockResolvedValueOnce('y')
+          .mockResolvedValueOnce('n'),                      // decline AGENTS.md
+      };
+
+      await runSetup({
+        io: mockIO,
+        passphrase: 'a-valid-passphrase-here-now',
+        passphraseConfirm: 'a-valid-passphrase-here-now',
+        backupPath: tmpDir,
+        skipScan: true,
+      });
+
+      // Should NOT have written to AGENTS.md
+      const agentsAppend = fs.appendFileSync.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('AGENTS.md')
+      );
+      expect(agentsAppend).toBeUndefined();
+      // But should print the snippet for manual addition
+      const allOutput = mockIO.output.join('\n');
+      expect(allOutput).toMatch(/Lobsterfile Maintenance/);
+    });
+
+    it('skips AGENTS.md prompt if section already exists', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('AGENTS.md')) return true;
+        if (typeof p === 'string' && p.includes('lobster-backup.json')) return false;
+        return false;
+      });
+      fs.readFileSync.mockReturnValue('# AGENTS.md\n## Lobsterfile Maintenance (lobster-backup)\n');
+      fs.mkdirSync.mockReturnValue(undefined);
+      fs.writeFileSync.mockReturnValue(undefined);
+
       const mockIO = {
         output: [],
         write(msg) { this.output.push(msg); },
         prompt: vi.fn()
           .mockResolvedValueOnce('I have saved this key')
           .mockResolvedValueOnce('y'),
+          // No third prompt — should not ask about AGENTS.md
       };
-
-      fs.existsSync.mockReturnValue(false);
-      fs.mkdirSync.mockReturnValue(undefined);
-      fs.writeFileSync.mockReturnValue(undefined);
 
       await runSetup({
         io: mockIO,
@@ -401,13 +482,7 @@ describe('Setup Script', () => {
       });
 
       const allOutput = mockIO.output.join('\n');
-      expect(allOutput).toMatch(/AGENTS\.md|Lobsterfile Maintenance/i);
-
-      // Must NOT write to AGENTS.md
-      const agentsWrite = fs.writeFileSync.mock.calls.find(
-        (c) => c[0].includes('AGENTS.md')
-      );
-      expect(agentsWrite).toBeUndefined();
+      expect(allOutput).toMatch(/already has/i);
     });
   });
 
