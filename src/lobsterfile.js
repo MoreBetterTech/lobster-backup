@@ -91,16 +91,13 @@ export function initLobsterfile(lobsterfilePath, options = {}) {
   if (seedPath && fs.existsSync(seedPath)) {
     const seedContent = fs.readFileSync(seedPath, 'utf-8');
     const seedLines = seedContent.split('\n');
-    // Skip the seed header (lines starting with # at the top)
-    let headerDone = false;
-    const seedBody = seedLines.filter(line => {
-      if (!headerDone && (line.startsWith('#') || line.trim() === '')) {
-        if (line.trim() === '') headerDone = true;
-        return false;
-      }
-      headerDone = true;
-      return true;
-    }).join('\n');
+    // Skip the seed header: contiguous block of comment/blank lines at the top.
+    // Header ends at the first non-comment, non-blank line (an actual command).
+    let firstCommandIdx = seedLines.findIndex(line => 
+      line.trim() !== '' && !line.trim().startsWith('#')
+    );
+    if (firstCommandIdx === -1) firstCommandIdx = seedLines.length;
+    const seedBody = seedLines.slice(firstCommandIdx).join('\n');
     
     if (seedBody.trim()) {
       content += '# --- Seeded from environment audit ---\n';
