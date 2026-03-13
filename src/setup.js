@@ -217,31 +217,81 @@ export async function runSetup(options) {
     io.write('\n📝 Lobsterfile already exists — not overwritten.');
   }
 
-  // Does NOT auto-modify AGENTS.md: Skills should not auto-modify core agent 
-  // files. The snippet is printed; the human decides. This is a trust boundary.
   io.write('\n✅ Lobster backup has been configured successfully!');
   io.write('');
+
+  // 12. Offer to add Lobsterfile maintenance instructions to AGENTS.md
+  // Human-in-the-loop: we ask, they confirm, we edit. Respects the trust
+  // boundary (skills don't silently modify core agent files) while removing
+  // the friction of manual copy-paste.
+  const agentsSnippet = `
+
+## Lobsterfile Maintenance (lobster-backup)
+Whenever a prompt leads you to make any change to the system environment —
+installing a package, enabling a service, creating a user, modifying a config
+file outside the workspace, registering an external dependency — you MUST
+append the corresponding step(s) to the Lobsterfile before considering the
+task complete. Same obligation as updating MEMORY.md.
+
+Rules:
+- Prefix commands requiring root with \`sudo\` exactly as you ran them
+- Write every step IDEMPOTENTLY — assume the script may run on a machine
+  where some steps are already done
+- Use \`{{VARIABLE}}\` placeholders for any environment-specific values;
+  record the value in lobsterfile.env
+`;
+
+  // Resolve workspace path from openclaw.json (same as scan.js), fall back to default
+  let workspacePath = path.join(os.homedir(), '.openclaw', 'workspace');
+  const openclawJsonPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+  if (fs.existsSync(openclawJsonPath)) {
+    try {
+      const ocConfig = JSON.parse(fs.readFileSync(openclawJsonPath, 'utf-8'));
+      if (ocConfig.workspace) workspacePath = ocConfig.workspace;
+    } catch { /* use default */ }
+  }
+
+  const agentsMdPath = path.join(workspacePath, 'AGENTS.md');
+  let agentsAlreadyHas = false;
+  
+  if (!fs.existsSync(agentsMdPath)) {
+    io.write(`⚠️  AGENTS.md not found at ${agentsMdPath}`);
+    io.write('   Your agent needs a Lobsterfile Maintenance section in AGENTS.md.');
+    io.write('   Add it manually once your workspace is set up:');
+    io.write('');
+    io.write(agentsSnippet);
+  } else {
+    const agentsContent = fs.readFileSync(agentsMdPath, 'utf-8');
+    agentsAlreadyHas = agentsContent.includes('Lobsterfile Maintenance');
+  }
+
+  if (agentsAlreadyHas) {
+    io.write('📋 AGENTS.md already has Lobsterfile maintenance instructions.');
+  } else if (fs.existsSync(agentsMdPath)) {
+    io.write('📋 Your AGENTS.md needs Lobsterfile maintenance instructions so your');
+    io.write('   agent knows to update the Lobsterfile when it changes system state.');
+    io.write('');
+    const addToAgents = await io.prompt('Add Lobsterfile maintenance instructions to your AGENTS.md? [y/n]: ');
+    
+    if (addToAgents.toLowerCase() === 'y' || addToAgents.toLowerCase() === 'yes') {
+      fs.appendFileSync(agentsMdPath, agentsSnippet);
+      io.write('✅ Added Lobsterfile maintenance section to AGENTS.md');
+    } else {
+      io.write('');
+      io.write('To add it manually later, paste this into your AGENTS.md:');
+      io.write('');
+      io.write(agentsSnippet);
+    }
+  }
+
+  io.write('');
   io.write('╔══════════════════════════════════════════════════════════════════╗');
-  io.write('║                     ⚠️  REQUIRED NEXT STEPS                     ║');
+  io.write('║                       📋  NEXT STEP                             ║');
   io.write('╠══════════════════════════════════════════════════════════════════╣');
   io.write('║                                                                  ║');
-  io.write('║  1. Run `lobster scan --register` to discover and register       ║');
-  io.write('║     system files (Caddy configs, systemd units, etc.)            ║');
-  io.write('║     Without this, backups only include ~/.openclaw/              ║');
-  io.write('║                                                                  ║');
-  io.write('║  2. Add this to your AGENTS.md:                                  ║');
-  io.write('║                                                                  ║');
-  io.write('║     ## Lobsterfile Maintenance (lobster-backup)                  ║');
-  io.write('║     Whenever a prompt leads you to make any change to the        ║');
-  io.write('║     system environment — installing a package, enabling a        ║');
-  io.write('║     service, creating a user, modifying a config file outside    ║');
-  io.write('║     the workspace, registering an external dependency — you      ║');
-  io.write('║     MUST append the corresponding step(s) to the Lobsterfile     ║');
-  io.write('║     before considering the task complete. Same obligation as     ║');
-  io.write('║     updating MEMORY.md.                                          ║');
-  io.write('║                                                                  ║');
-  io.write('║  Backups without scan = workspace only. No system configs.       ║');
-  io.write('║  Backups without AGENTS.md update = Lobsterfile won\'t grow.     ║');
+  io.write('║  Run `lobster scan --register` to discover and register          ║');
+  io.write('║  system files (Caddy configs, systemd units, etc.)               ║');
+  io.write('║  Without this, backups only include ~/.openclaw/                 ║');
   io.write('║                                                                  ║');
   io.write('╚══════════════════════════════════════════════════════════════════╝');
   io.write('');
