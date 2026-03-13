@@ -11,7 +11,7 @@
  * @returns {object} Parsed result with command, flags, and unknownCommand
  */
 export function parseArgs(args) {
-  const validCommands = ['setup', 'scan', 'backup', 'restore'];
+  const validCommands = ['setup', 'scan', 'backup', 'restore', 'inspect'];
   
   if (!args || args.length === 0) {
     return { command: 'help', flags: {}, unknownCommand: undefined };

@@ -235,8 +235,12 @@ export async function encryptArchive({ inputPath, outputPath, recipients }) {
  */
 export async function decryptArchive({ inputPath, identityPath }) {
   try {
-    // Use execFileSync with args array to avoid shell injection via file paths
-    const result = execFileSync('age', ['--decrypt', '-i', identityPath, inputPath], { stdio: 'pipe' });
+    // Use execFileSync with args array to avoid shell injection via file paths.
+    // maxBuffer must be large enough for the decrypted archive — default 1MB is too small.
+    const result = execFileSync('age', ['--decrypt', '-i', identityPath, inputPath], {
+      stdio: 'pipe',
+      maxBuffer: 500 * 1024 * 1024, // 500MB
+    });
     return result;
   } catch (error) {
     throw new Error('Failed to decrypt archive: decryption failed');

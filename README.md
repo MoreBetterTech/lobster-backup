@@ -78,7 +78,7 @@ This will:
 2. Generate and display a **Recovery Key** — save this offline, it cannot be recovered
 3. Scan your system for OC-related config files (`lobster scan`)
 4. Show a summary and ask for confirmation
-5. Print an AGENTS.md snippet to add to your agent's instructions
+5. Offer to add Lobsterfile maintenance instructions to your AGENTS.md
 
 ### Backup
 
@@ -112,6 +112,15 @@ lobster scan                 # Find OC-related files not yet in the backup
 lobster scan --register      # Find and register in one step
 lobster scan --paths /custom # Scan additional locations
 ```
+
+### Inspect a Backup
+
+```bash
+lobster inspect              # Decrypt and inspect the most recent backup
+lobster inspect <file>       # Inspect a specific backup file
+```
+
+Shows the archive structure, metadata, manifests, Lobsterfile, and environment variables — without restoring anything. Useful for verifying what's in a backup or debugging issues.
 
 ---
 
