@@ -81,7 +81,26 @@ function walkDirectory(dir, exclusions = []) {
 }
 
 /**
+ * Additional exclusion patterns for internal manifest
+ * These are added on top of DEFAULT_EXCLUSIONS when walking ~/.openclaw/
+ */
+const INTERNAL_EXTRA_EXCLUSIONS = [
+  'dist/',
+  'build/',
+  'venv/',
+  '.venv/',
+  '__pycache__/',
+  '*.pyc',
+  'lobster-backups/',  // Don't back up backups
+  'lobster-backup.lock',
+];
+
+/**
  * Generate internal manifest - files from ~/.openclaw/
+ * 
+ * Walks the ENTIRE ~/.openclaw/ directory tree, applying exclusions.
+ * The old allowlist approach silently dropped new workspace content from backups.
+ * 
  * @param {string} ocDir - Path to .openclaw directory (defaults to ~/.openclaw)
  * @param {object} config - Configuration with exclusions
  * @returns {Array} List of files to backup
@@ -91,43 +110,10 @@ export function generateInternalManifest(ocDir = null, config = {}) {
     ocDir = path.join(os.homedir(), '.openclaw');
   }
   
-  const exclusions = config.exclusions || [];
-  const files = [];
+  const exclusions = [...INTERNAL_EXTRA_EXCLUSIONS, ...(config.exclusions || [])];
   
-  // Specific paths to include
-  const specificPaths = [
-    'workspace/MEMORY.md',
-    'workspace/SOUL.md', 
-    'workspace/USER.md',
-    'workspace/IDENTITY.md',
-    'workspace/AGENTS.md',
-    'workspace/TOOLS.md',
-    'workspace/HEARTBEAT.md',
-    'openclaw.json',
-    'cron/jobs.json'
-  ];
-  
-  // Add specific paths if they exist
-  for (const relativePath of specificPaths) {
-    const fullPath = path.join(ocDir, relativePath);
-    if (fs.existsSync(fullPath) && !isExcluded(fullPath, exclusions)) {
-      files.push(fullPath);
-    }
-  }
-  
-  // Walk specific directories
-  const directories = [
-    'workspace/memory',
-    'skills',
-    'identity'
-  ];
-  
-  for (const dir of directories) {
-    const fullDir = path.join(ocDir, dir);
-    files.push(...walkDirectory(fullDir, exclusions));
-  }
-  
-  return files;
+  // Walk the entire ~/.openclaw/ tree with exclusions
+  return walkDirectory(ocDir, exclusions);
 }
 
 /**
@@ -254,12 +240,13 @@ export function detectGitRepo(dirPath) {
 export function generateGitCloneEntry(gitInfo) {
   const { remoteUrl, localPath, ref } = gitInfo;
   
+  // Quote paths for bash safety — spaces in paths are common
   let entry = `# Clone ${remoteUrl} to ${localPath}\n`;
-  entry += `git clone ${remoteUrl} ${localPath}\n`;
-  entry += `cd ${localPath}\n`;
+  entry += `git clone "${remoteUrl}" "${localPath}"\n`;
+  entry += `cd "${localPath}"\n`;
   
   if (ref) {
-    entry += `git checkout ${ref}\n`;
+    entry += `git checkout "${ref}"\n`;
   }
   
   return entry;

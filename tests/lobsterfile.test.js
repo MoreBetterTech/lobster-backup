@@ -1,6 +1,7 @@
 /**
  * Lobsterfile Parser Tests
- * Tests for reading, appending, validating, and variable detection in the Lobsterfile.
+ * Tests for reading, appending, validating, variable detection,
+ * and lifecycle (init/creation) of the Lobsterfile.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
@@ -8,8 +9,10 @@ import {
   appendToLobsterfile,
   validateLobsterfile,
   detectPlaceholders,
+  initLobsterfile,
 } from '../src/lobsterfile.js';
 import fs from 'node:fs';
+import path from 'node:path';
 import { execSync } from 'node:child_process';
 
 vi.mock('node:fs');
@@ -72,6 +75,69 @@ describe('Lobsterfile Parser', () => {
   it('reports malformed {{}} (empty placeholder) as error', () => {
     const content = 'some config with {{}} empty placeholder';
     expect(() => detectPlaceholders(content)).toThrow(/empty|malformed|invalid/i);
+  });
+
+  // --- Lobsterfile Lifecycle (initLobsterfile) ---
+  describe('Lifecycle', () => {
+    it('initLobsterfile creates file with shebang and header', () => {
+      fs.existsSync.mockReturnValue(false);
+      fs.writeFileSync.mockReturnValue(undefined);
+      fs.mkdirSync.mockReturnValue(undefined);
+
+      const result = initLobsterfile('/home/test/.openclaw/lobsterfile');
+      
+      expect(result.created).toBe(true);
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/home/test/.openclaw/lobsterfile',
+        expect.stringContaining('#!/bin/bash'),
+        expect.any(Object)
+      );
+    });
+
+    it('initLobsterfile does not overwrite existing Lobsterfile', () => {
+      fs.existsSync.mockReturnValue(true); // file already exists
+
+      const result = initLobsterfile('/home/test/.openclaw/lobsterfile');
+      
+      expect(result.created).toBe(false);
+      expect(result.reason).toMatch(/already exists/i);
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('initLobsterfile seeds from lobsterfile.seed if available', () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (p.includes('lobsterfile.seed')) return true;
+        if (p.endsWith('lobsterfile') && !p.includes('.seed')) return false;
+        return true; // parent dir
+      });
+      fs.readFileSync.mockReturnValue(
+        '#!/bin/bash\n# lobsterfile.seed — inferred\n\n# APT packages\napt-get install -y curl\napt-get install -y caddy\n'
+      );
+      fs.writeFileSync.mockReturnValue(undefined);
+      fs.mkdirSync.mockReturnValue(undefined);
+
+      const result = initLobsterfile('/home/test/.openclaw/lobsterfile', {
+        seedPath: '/home/test/.openclaw/lobsterfile.seed',
+      });
+      
+      expect(result.created).toBe(true);
+      expect(result.seeded).toBe(true);
+      const written = fs.writeFileSync.mock.calls[0][1];
+      expect(written).toContain('#!/bin/bash');
+      expect(written).toContain('apt-get install -y curl');
+    });
+
+    it('initLobsterfile creates valid bash', () => {
+      fs.existsSync.mockReturnValue(false);
+      fs.writeFileSync.mockReturnValue(undefined);
+      fs.mkdirSync.mockReturnValue(undefined);
+
+      initLobsterfile('/home/test/.openclaw/lobsterfile');
+      
+      const written = fs.writeFileSync.mock.calls[0][1];
+      // Starts with shebang
+      expect(written.startsWith('#!/bin/bash\n')).toBe(true);
+    });
   });
 
   it('extracts complete list of all referenced variables', () => {

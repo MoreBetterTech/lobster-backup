@@ -155,6 +155,55 @@ export async function unwrapVaultKey(wrapped, wrappingKey) {
 }
 
 /**
+ * Wrap (encrypt) an age private key using AES-256-GCM with the vault key
+ * 
+ * The age private key is variable-length text (not a fixed 32 bytes like the vault key).
+ * Same AES-256-GCM approach but different AAD to prevent confusion with vault key wrapping.
+ * 
+ * @param {string} agePrivateKey - The AGE-SECRET-KEY-... string
+ * @param {Buffer} vaultKey - The 256-bit vault key
+ * @returns {Buffer} IV (12) + encrypted data (variable) + auth tag (16)
+ */
+export function wrapAgePrivateKey(agePrivateKey, vaultKey) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', vaultKey, iv);
+  cipher.setAAD(Buffer.from('lobster-backup-age-private-key', 'utf8'));
+  
+  const plaintext = Buffer.from(agePrivateKey, 'utf8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  
+  return Buffer.concat([iv, encrypted, authTag]);
+}
+
+/**
+ * Unwrap (decrypt) an age private key using AES-256-GCM with the vault key
+ * @param {Buffer} wrapped - IV + encrypted data + auth tag
+ * @param {Buffer} vaultKey - The 256-bit vault key
+ * @returns {string} The decrypted AGE-SECRET-KEY-... string
+ */
+export function unwrapAgePrivateKey(wrapped, vaultKey) {
+  if (wrapped.length < 28) { // minimum: 12 IV + 0 data + 16 tag
+    throw new Error('Invalid wrapped age private key length');
+  }
+  
+  const iv = wrapped.subarray(0, 12);
+  const encrypted = wrapped.subarray(12, wrapped.length - 16);
+  const authTag = wrapped.subarray(wrapped.length - 16);
+  
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', vaultKey, iv);
+    decipher.setAuthTag(authTag);
+    decipher.setAAD(Buffer.from('lobster-backup-age-private-key', 'utf8'));
+    
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch (error) {
+    throw new Error('Failed to unwrap age private key: invalid vault key or corrupted data');
+  }
+}
+
+/**
  * Encrypt an archive using age with multiple recipients
  * @param {Object} options - Encryption options
  * @param {string} options.inputPath - Path to input file to encrypt

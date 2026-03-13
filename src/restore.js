@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
-import { decryptArchive, derivePassphraseKey, unwrapVaultKey } from './crypto.js';
+import { decryptArchive, derivePassphraseKey, unwrapVaultKey, unwrapAgePrivateKey } from './crypto.js';
 import { substituteVariables, parseEnvFile } from './lobsterfile-env.js';
 
 /**
@@ -229,8 +229,10 @@ export async function promptForCredential(mockIO) {
  */
 export async function decryptBackup({ archivePath, credentialType, passphrase, recoveryKey, config }) {
   try {
-    // Step 1: Verify credentials by unwrapping the vault key.
-    // This proves the passphrase/recovery key is correct before we attempt decryption.
+    // Step 1: Unwrap the vault key using passphrase or recovery key.
+    // The vault key is needed to unwrap the age private key for archive decryption.
+    let vaultKey;
+
     if (credentialType === 'passphrase' && passphrase) {
       if (!config.argon2Salt || !config.vaultKeyWrappedPassphrase) {
         throw new Error('Missing Argon2 salt or wrapped vault key in config');
@@ -238,27 +240,29 @@ export async function decryptBackup({ archivePath, credentialType, passphrase, r
       const salt = Buffer.from(config.argon2Salt, 'base64');
       const wrappingKey = await derivePassphraseKey(passphrase, salt);
       const wrappedVaultKey = Buffer.from(config.vaultKeyWrappedPassphrase, 'base64');
-      await unwrapVaultKey(wrappedVaultKey, wrappingKey);
+      vaultKey = await unwrapVaultKey(wrappedVaultKey, wrappingKey);
     } else if (credentialType === 'recovery' && recoveryKey) {
       if (!config.vaultKeyWrappedRecovery) {
         throw new Error('Missing recovery-wrapped vault key in config');
       }
       const recoveryKeyBuffer = Buffer.from(recoveryKey, 'base64');
       const wrappedVaultKey = Buffer.from(config.vaultKeyWrappedRecovery, 'base64');
-      await unwrapVaultKey(wrappedVaultKey, recoveryKeyBuffer);
+      vaultKey = await unwrapVaultKey(wrappedVaultKey, recoveryKeyBuffer);
     } else {
       throw new Error('Invalid credential type or missing credentials');
     }
 
-    // Step 2: Use the age private key from config to decrypt the archive.
-    // The private key is what age needs to decrypt files encrypted to the matching public key.
-    if (!config.agePrivateKey) {
-      throw new Error('Missing age private key in config — was setup completed?');
+    // Step 2: Unwrap the age private key using the vault key.
+    // Full chain: passphrase → Argon2id → unwrap vault key → unwrap age private key → decrypt archive.
+    if (!config.agePrivateKeyWrapped) {
+      throw new Error('Missing wrapped age private key in config — re-run lobster setup');
     }
+    const wrappedAgeKey = Buffer.from(config.agePrivateKeyWrapped, 'base64');
+    const agePrivateKey = unwrapAgePrivateKey(wrappedAgeKey, vaultKey);
 
     const tmpIdentityPath = path.join(os.tmpdir(), `lobster-identity-${Date.now()}`);
     try {
-      fs.writeFileSync(tmpIdentityPath, config.agePrivateKey + '\n', { mode: 0o600 });
+      fs.writeFileSync(tmpIdentityPath, agePrivateKey + '\n', { mode: 0o600 });
 
       // Step 3: Decrypt archive using the age private key
       const result = await decryptArchive({
@@ -600,13 +604,21 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
     config,
   });
 
-  // Step 5: Extract archive to temp directory
+  // Step 5: Write decrypted tarball to temp file, then extract
+  // decryptBackup returns { success, data: Buffer } where data is the decrypted tarball.
+  // We must extract the decrypted bytes, NOT the original .age file.
+  const decryptedPath = path.join(os.tmpdir(), `lobster-decrypted-${Date.now()}.tar.gz`);
+  fs.writeFileSync(decryptedPath, decryptResult.data);
+
   const extractDir = path.join(os.tmpdir(), `lobster-restore-${Date.now()}`);
   fs.mkdirSync(extractDir, { recursive: true });
 
   try {
     const { execFileSync } = await import('node:child_process');
-    execFileSync('tar', ['-xzf', archivePath, '-C', extractDir], { stdio: 'pipe' });
+    execFileSync('tar', ['-xzf', decryptedPath, '-C', extractDir], { stdio: 'pipe' });
+
+    // Clean up decrypted tarball immediately — contains plaintext secrets
+    try { fs.unlinkSync(decryptedPath); } catch { /* ignore */ }
 
     // Step 6: Verify integrity via checksums in meta.json
     const metaPath = path.join(extractDir, 'meta.json');
@@ -674,6 +686,8 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
     };
 
   } finally {
+    // Clean up decrypted tarball (if extraction failed before the early cleanup)
+    try { fs.unlinkSync(decryptedPath); } catch { /* ignore */ }
     // Clean up extraction directory
     try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }

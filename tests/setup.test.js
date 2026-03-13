@@ -411,6 +411,68 @@ describe('Setup Script', () => {
     });
   });
 
+  // --- Lobsterfile Creation ---
+  describe('Lobsterfile Creation', () => {
+    it('setup creates Lobsterfile at ~/.openclaw/lobsterfile', async () => {
+      fs.existsSync.mockReturnValue(false);
+      fs.mkdirSync.mockReturnValue(undefined);
+      fs.writeFileSync.mockReturnValue(undefined);
+
+      const mockIO = {
+        output: [],
+        write(msg) { this.output.push(msg); },
+        prompt: vi.fn().mockResolvedValue('I have saved this key'),
+      };
+
+      await runSetup({
+        io: mockIO,
+        passphrase: 'a-valid-passphrase-here-now',
+        passphraseConfirm: 'a-valid-passphrase-here-now',
+        backupPath: '/tmp/lobster-test-setup',
+        skipScan: true,
+        skipConfirmation: true,
+      });
+
+      // Lobsterfile should be created with shebang
+      const lobsterfileWrite = fs.writeFileSync.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('lobsterfile') &&
+               !c[0].includes('.json') && !c[0].includes('.env') && !c[0].includes('.seed')
+      );
+      expect(lobsterfileWrite).toBeDefined();
+      expect(lobsterfileWrite[1]).toContain('#!/bin/bash');
+    });
+
+    it('setup does not overwrite existing Lobsterfile', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        // Config exists = false (no reconfigure prompt), but Lobsterfile exists = true
+        if (typeof p === 'string' && p.endsWith('lobster-backup.json')) return false;
+        if (typeof p === 'string' && p.endsWith('lobsterfile') && !p.includes('.seed') && !p.includes('.env')) return true;
+        return false;
+      });
+      fs.mkdirSync.mockReturnValue(undefined);
+      fs.writeFileSync.mockReturnValue(undefined);
+
+      const mockIO = {
+        output: [],
+        write(msg) { this.output.push(msg); },
+        prompt: vi.fn().mockResolvedValue('I have saved this key'),
+      };
+
+      await runSetup({
+        io: mockIO,
+        passphrase: 'a-valid-passphrase-here-now',
+        passphraseConfirm: 'a-valid-passphrase-here-now',
+        backupPath: '/tmp/lobster-test-setup',
+        skipScan: true,
+        skipConfirmation: true,
+      });
+
+      // Should mention Lobsterfile already exists
+      const allOutput = mockIO.output.join('\n');
+      expect(allOutput).toMatch(/lobsterfile.*already|not overwritten/i);
+    });
+  });
+
   // --- Idempotency ---
   describe('Idempotency', () => {
     it('re-running setup on existing install warns and offers to reconfigure', async () => {

@@ -85,9 +85,13 @@ describe('End-to-End Scenarios', () => {
     // wrapped keys are real base64 strings of the right length
     const wrappedKey = Buffer.from(savedConfig.vaultKeyWrappedPassphrase, 'base64');
     expect(wrappedKey.length).toBe(60); // 12 IV + 32 encrypted + 16 auth tag
-    // Config should include age keypair for archive encryption
+    // Config should include age public key and wrapped (not plaintext) private key
     expect(savedConfig.agePublicKey).toMatch(/^age1/);
-    expect(savedConfig.agePrivateKey).toMatch(/^AGE-SECRET-KEY-/);
+    expect(savedConfig.agePrivateKeyWrapped).toBeDefined();
+    expect(savedConfig.agePrivateKey).toBeUndefined(); // must NOT store plaintext
+    // Wrapped key should be a base64 string of reasonable length (12 IV + encrypted + 16 tag)
+    const wrappedAgeKey = Buffer.from(savedConfig.agePrivateKeyWrapped, 'base64');
+    expect(wrappedAgeKey.length).toBeGreaterThan(28); // minimum: 12 + 0 + 16
 
     // 2. Backup (dry run)
     const backupResult = await runBackup({
