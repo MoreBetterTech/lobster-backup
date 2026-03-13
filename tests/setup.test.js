@@ -17,7 +17,7 @@ import {
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
@@ -31,6 +31,12 @@ describe('Setup Script', () => {
     tmpDir = '/tmp/lobster-test-setup';
     vi.spyOn(os, 'homedir').mockReturnValue(mockHome);
     vi.clearAllMocks();
+    // Mock age-keygen output for generateAgeKeypair
+    execFileSync.mockReturnValue(
+      '# created: 2026-03-12T18:00:00Z\n' +
+      '# public key: age1testpublickey0000000000000000000000000000000000000000000xxxx\n' +
+      'AGE-SECRET-KEY-1TESTPRIVATEKEY000000000000000000000000000000000000000XXXX'
+    );
   });
 
   afterEach(() => {

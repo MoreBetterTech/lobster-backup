@@ -140,10 +140,10 @@ function scanDirectory(dirPath, inputs, findings) {
         }
       } catch (error) {
         if (error.code === 'EACCES') {
-          // EACCES skip with warning: On a multi-user server, some /etc/ files 
-          // are root-only. Crashing on permission denied would make scan useless. 
-          // Skip and warn so the user knows.
-          console.warn(`Warning: Permission denied reading ${fullPath}, skipping`);
+          // Silently skip permission-denied files. Most are system files 
+          // (shadow, ssh keys, apt locks) that are never OC-related.
+          // Printing warnings for each one floods the terminal and obscures
+          // the actual scan results.
           continue;
         }
         // Other errors, skip this entry
@@ -156,7 +156,7 @@ function scanDirectory(dirPath, inputs, findings) {
       return;
     }
     if (error.code === 'EACCES') {
-      console.warn(`Warning: Permission denied reading ${dirPath}, skipping`);
+      // Silently skip — see note above about permission-denied noise
       return;
     }
     // Other errors, skip this directory
@@ -170,17 +170,33 @@ function scanDirectory(dirPath, inputs, findings) {
  * @returns {boolean} Whether to scan subdirectory
  */
 function shouldScanSubdirectory(dirPath) {
-  // Avoid deep recursion and known uninteresting paths
   const baseName = path.basename(dirPath);
-  const skipDirs = ['node_modules', '.git', 'dist', 'build', '__pycache__'];
+  
+  // Skip known-uninteresting directories
+  const skipDirs = [
+    'node_modules', '.git', 'dist', 'build', '__pycache__',
+    // System dirs that are never OC-related but contain many permission-denied files:
+    'apt', 'dpkg', 'snapd', 'cloud', 'apparmor', 'polkit-1',
+    'private', 'udisks2', 'fwupd', 'ldconfig', 'amazon',
+    'cache', 'lock', 'lost+found',
+  ];
   
   if (skipDirs.includes(baseName)) {
     return false;
   }
+
+  // For /var, only scan specific subdirectories known to hold web/app configs
+  if (dirPath.startsWith('/var/')) {
+    const allowedVarPaths = ['/var/www', '/var/log/caddy', '/var/log/nginx'];
+    const isAllowed = allowedVarPaths.some(p => dirPath.startsWith(p) || dirPath === p.slice(0, dirPath.length));
+    if (!isAllowed && dirPath.split(path.sep).length > 3) {
+      return false; // Don't recurse deep into /var/lib/*, /var/cache/*, etc.
+    }
+  }
   
   // Limit depth to avoid excessive scanning
   const pathDepth = dirPath.split(path.sep).length;
-  return pathDepth < 10;  // Arbitrary depth limit
+  return pathDepth < 8;
 }
 
 /**

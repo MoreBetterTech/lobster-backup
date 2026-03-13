@@ -14,6 +14,7 @@ import {
   generateSalt,
   generateVaultKey as cryptoGenerateVaultKey,
   generateRecoveryKey as cryptoGenerateRecoveryKey,
+  generateAgeKeypair,
   derivePassphraseKey,
   wrapVaultKey
 } from './crypto.js';
@@ -102,6 +103,9 @@ async function hashPassphrase(passphrase, salt) {
 export async function runSetup(options) {
   const { io, passphrase, passphraseConfirm, backupPath, skipScan, skipConfirmation } = options;
   
+  // Prerequisites (age, node, etc.) are checked by the CLI preflight.
+  // If someone calls runSetup programmatically, they're responsible for prereqs.
+
   // 1. Check for existing config
   const configPath = path.join(os.homedir(), '.openclaw', 'lobster-backup.json');
   if (fs.existsSync(configPath)) {
@@ -155,6 +159,12 @@ export async function runSetup(options) {
   const vaultKeyWrappedPassphrase = await wrapVaultKey(vaultKeyBuffer, passphraseKey);
   const vaultKeyWrappedRecovery = await wrapVaultKey(vaultKeyBuffer, recoveryKeyBuffer);
 
+  // 6b. Generate an age keypair for archive encryption.
+  // The public key is the "recipient" that age encrypts TO.
+  // The private key is stored (wrapped by vault key) so restore can decrypt.
+  const ageKeypair = generateAgeKeypair();
+  io.write(`\nGenerated age encryption keypair (public: ${ageKeypair.publicKey.slice(0, 20)}...)`);
+
   // 7. Show summary
   io.write('\n📋 **Setup Summary**');
   io.write(`Backup destination: ${resolvedBackupPath}`);
@@ -175,6 +185,9 @@ export async function runSetup(options) {
     vaultKeyWrappedPassphrase: vaultKeyWrappedPassphrase.toString('base64'),
     vaultKeyWrappedRecovery: vaultKeyWrappedRecovery.toString('base64'),
     argon2Salt: salt.toString('base64'),
+    // age keypair: public key is the encryption recipient, private key is for decryption
+    agePublicKey: ageKeypair.publicKey,
+    agePrivateKey: ageKeypair.privateKey,
     formatVersion: 1,
     schedule: {
       hourly: true,
@@ -189,15 +202,30 @@ export async function runSetup(options) {
   // Does NOT auto-modify AGENTS.md: Skills should not auto-modify core agent 
   // files. The snippet is printed; the human decides. This is a trust boundary.
   io.write('\n✅ Lobster backup has been configured successfully!');
-  io.write('\n📝 **Next Step: Update AGENTS.md**');
-  io.write('Add the following section to your AGENTS.md file:');
   io.write('');
-  io.write('## Lobsterfile Maintenance (lobster-backup)');
-  io.write('Whenever a prompt leads you to make any change to the system environment —');
-  io.write('installing a package, enabling a service, creating a user, modifying a config');
-  io.write('file outside the workspace, registering an external dependency — you MUST');
-  io.write('append the corresponding step(s) to the Lobsterfile before considering the');
-  io.write('task complete. Same obligation as updating MEMORY.md.');
+  io.write('╔══════════════════════════════════════════════════════════════════╗');
+  io.write('║                     ⚠️  REQUIRED NEXT STEPS                     ║');
+  io.write('╠══════════════════════════════════════════════════════════════════╣');
+  io.write('║                                                                  ║');
+  io.write('║  1. Run `lobster scan --register` to discover and register       ║');
+  io.write('║     system files (Caddy configs, systemd units, etc.)            ║');
+  io.write('║     Without this, backups only include ~/.openclaw/              ║');
+  io.write('║                                                                  ║');
+  io.write('║  2. Add this to your AGENTS.md:                                  ║');
+  io.write('║                                                                  ║');
+  io.write('║     ## Lobsterfile Maintenance (lobster-backup)                  ║');
+  io.write('║     Whenever a prompt leads you to make any change to the        ║');
+  io.write('║     system environment — installing a package, enabling a        ║');
+  io.write('║     service, creating a user, modifying a config file outside    ║');
+  io.write('║     the workspace, registering an external dependency — you      ║');
+  io.write('║     MUST append the corresponding step(s) to the Lobsterfile     ║');
+  io.write('║     before considering the task complete. Same obligation as     ║');
+  io.write('║     updating MEMORY.md.                                          ║');
+  io.write('║                                                                  ║');
+  io.write('║  Backups without scan = workspace only. No system configs.       ║');
+  io.write('║  Backups without AGENTS.md update = Lobsterfile won\'t grow.     ║');
+  io.write('║                                                                  ║');
+  io.write('╚══════════════════════════════════════════════════════════════════╝');
   io.write('');
 }
 

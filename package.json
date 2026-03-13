@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Backup and restore system for the OpenClaw ecosystem",
   "type": "module",
+  "bin": {
+    "lobster": "./bin/lobster"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",

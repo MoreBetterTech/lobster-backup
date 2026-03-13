@@ -42,8 +42,15 @@ Before installing lobster-backup, you need:
 - A server or machine running a supported OS (Linux/macOS)
 - Node.js installed (v18+)
 - OpenClaw installed and initialized (`openclaw` on PATH)
+- **`age` encryption tool** — required for backup encryption
 
-lobster-backup does **not** install these prerequisites. If rebuilding from scratch after a disaster, set up Node.js and OpenClaw first, then run `lobster restore`.
+```bash
+# Install age:
+sudo apt-get install -y age    # Ubuntu/Debian
+brew install age                # macOS
+```
+
+lobster-backup does **not** install these prerequisites. If rebuilding from scratch after a disaster, set up Node.js, OpenClaw, and age first, then run `lobster restore`.
 
 ---
 
@@ -52,10 +59,12 @@ lobster-backup does **not** install these prerequisites. If rebuilding from scra
 ### Install
 
 ```bash
+mkdir -p ~/.openclaw/skills
 cd ~/.openclaw/skills
 git clone https://github.com/MoreBetterTech/lobster-backup.git
 cd lobster-backup
 npm install
+npm link    # makes 'lobster' available on PATH
 ```
 
 ### First-Time Setup

@@ -42,7 +42,14 @@ describe('End-to-End Scenarios', () => {
     fs.readdirSync.mockReturnValue([]);
     fs.unlinkSync.mockReturnValue(undefined);
     execSync.mockReturnValue('');
-    execFileSync.mockReturnValue('');
+    execFileSync.mockImplementation((cmd) => {
+      if (cmd === 'age-keygen') {
+        return '# created: 2026-03-12T18:00:00Z\n' +
+          '# public key: age1testpublickey0000000000000000000000000000000000000000000xxxx\n' +
+          'AGE-SECRET-KEY-1TESTPRIVATEKEY000000000000000000000000000000000000000XXXX';
+      }
+      return '';
+    });
 
     const mockIO = {
       output: [],
@@ -54,7 +61,7 @@ describe('End-to-End Scenarios', () => {
         .mockResolvedValueOnce('y'),
     };
 
-    // 1. Setup — should write config with real Argon2id-wrapped keys
+    // 1. Setup — should write config with real Argon2id-wrapped keys and age keypair
     await runSetup({
       io: mockIO,
       passphrase: 'my-secure-passphrase-2026',
@@ -78,6 +85,9 @@ describe('End-to-End Scenarios', () => {
     // wrapped keys are real base64 strings of the right length
     const wrappedKey = Buffer.from(savedConfig.vaultKeyWrappedPassphrase, 'base64');
     expect(wrappedKey.length).toBe(60); // 12 IV + 32 encrypted + 16 auth tag
+    // Config should include age keypair for archive encryption
+    expect(savedConfig.agePublicKey).toMatch(/^age1/);
+    expect(savedConfig.agePrivateKey).toMatch(/^AGE-SECRET-KEY-/);
 
     // 2. Backup (dry run)
     const backupResult = await runBackup({

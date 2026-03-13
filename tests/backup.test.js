@@ -75,7 +75,10 @@ describe('Backup Script', () => {
 
     it('removes lock file on error (trap cleanup)', async () => {
       fs.existsSync.mockReturnValue(false);
-      execSync.mockImplementation(() => { throw new Error('tar failed'); });
+      execSync.mockImplementation((cmd) => {
+        if (typeof cmd === 'string' && cmd.includes('which age')) return '/usr/bin/age';
+        throw new Error('tar failed');
+      });
 
       try {
         await runBackup({ config: { backupPath: backupDir }, forceError: true });
@@ -374,7 +377,8 @@ describe('Backup Script', () => {
   describe('Error Handling', () => {
     it('disk full → partial archive cleaned up, no corrupt file left', async () => {
       fs.existsSync.mockReturnValue(false);
-      execSync.mockImplementation(() => {
+      execSync.mockImplementation((cmd) => {
+        if (typeof cmd === 'string' && cmd.includes('which age')) return '/usr/bin/age';
         throw Object.assign(new Error('No space left on device'), { code: 'ENOSPC' });
       });
 
@@ -445,7 +449,10 @@ describe('Backup Script', () => {
         if (typeof p === 'string' && p.includes('.lock')) return false;
         return true;
       });
-      execSync.mockImplementation(() => { throw new Error('catastrophic failure'); });
+      execSync.mockImplementation((cmd) => {
+        if (typeof cmd === 'string' && cmd.includes('which age')) return '/usr/bin/age';
+        throw new Error('catastrophic failure');
+      });
 
       try {
         await runBackup({ config: { backupPath: backupDir } });

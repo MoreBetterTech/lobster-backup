@@ -268,6 +268,7 @@ export async function runBackup(options) {
   let tempFiles = [];
   
   try {
+    // Prerequisites (age, etc.) are checked by the CLI preflight.
     // Acquire lock
     acquireLock();
     lockAcquired = true;
@@ -367,7 +368,7 @@ export async function runBackup(options) {
     await encryptArchive({
       inputPath: tarballPath,
       outputPath: encryptedPath,
-      recipients: config.recipients || ['age1defaultpublickey'] // fallback for tests
+      recipients: config.agePublicKey ? [config.agePublicKey] : (config.recipients || [])
     });
     
     // Plaintext cleanup on encryption success: Security-critical.
