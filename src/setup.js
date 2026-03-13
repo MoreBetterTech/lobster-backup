@@ -241,28 +241,40 @@ Rules:
   record the value in lobsterfile.env
 `;
 
-  const agentsMdPath = path.join(os.homedir(), '.openclaw', 'workspace', 'AGENTS.md');
+  // Resolve workspace path from openclaw.json (same as scan.js), fall back to default
+  let workspacePath = path.join(os.homedir(), '.openclaw', 'workspace');
+  const openclawJsonPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+  if (fs.existsSync(openclawJsonPath)) {
+    try {
+      const ocConfig = JSON.parse(fs.readFileSync(openclawJsonPath, 'utf-8'));
+      if (ocConfig.workspace) workspacePath = ocConfig.workspace;
+    } catch { /* use default */ }
+  }
+
+  const agentsMdPath = path.join(workspacePath, 'AGENTS.md');
   let agentsAlreadyHas = false;
   
-  if (fs.existsSync(agentsMdPath)) {
+  if (!fs.existsSync(agentsMdPath)) {
+    io.write(`⚠️  AGENTS.md not found at ${agentsMdPath}`);
+    io.write('   Your agent needs a Lobsterfile Maintenance section in AGENTS.md.');
+    io.write('   Add it manually once your workspace is set up:');
+    io.write('');
+    io.write(agentsSnippet);
+  } else {
     const agentsContent = fs.readFileSync(agentsMdPath, 'utf-8');
     agentsAlreadyHas = agentsContent.includes('Lobsterfile Maintenance');
   }
 
   if (agentsAlreadyHas) {
     io.write('📋 AGENTS.md already has Lobsterfile maintenance instructions.');
-  } else {
+  } else if (fs.existsSync(agentsMdPath)) {
     io.write('📋 Your AGENTS.md needs Lobsterfile maintenance instructions so your');
     io.write('   agent knows to update the Lobsterfile when it changes system state.');
     io.write('');
     const addToAgents = await io.prompt('Add Lobsterfile maintenance instructions to your AGENTS.md? [y/n]: ');
     
     if (addToAgents.toLowerCase() === 'y' || addToAgents.toLowerCase() === 'yes') {
-      if (fs.existsSync(agentsMdPath)) {
-        fs.appendFileSync(agentsMdPath, agentsSnippet);
-      } else {
-        fs.writeFileSync(agentsMdPath, agentsSnippet.trimStart());
-      }
+      fs.appendFileSync(agentsMdPath, agentsSnippet);
       io.write('✅ Added Lobsterfile maintenance section to AGENTS.md');
     } else {
       io.write('');
