@@ -56,6 +56,7 @@ Usage:
   lobster restore --from <path>  Restore from a specific backup file
   lobster restore --list         List available backups
   lobster restore --dry-run      Preview what would be restored
+  lobster inspect [backup-file]  Decrypt and inspect a backup's contents
   lobster --help                 Show this help message
 `);
 }
@@ -234,6 +235,30 @@ async function main() {
             io.write(`⚠️  ${w}`);
           }
         }
+        break;
+      }
+
+      case 'inspect': {
+        const { runInspect } = await import('../src/inspect.js');
+        const config = await loadConfig();
+
+        const credType = await io.prompt('Decrypt with (passphrase/recovery): ');
+        let passphrase, recoveryKey;
+
+        if (credType.trim().toLowerCase().startsWith('r')) {
+          recoveryKey = await io.prompt('Enter recovery key: ');
+        } else {
+          passphrase = await io.prompt('Enter backup passphrase: ');
+        }
+
+        await runInspect({
+          config,
+          backupFile: flags.from || args[1],
+          credentialType: credType.trim().toLowerCase().startsWith('r') ? 'recovery' : 'passphrase',
+          passphrase,
+          recoveryKey,
+          io,
+        });
         break;
       }
 
