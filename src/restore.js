@@ -254,17 +254,11 @@ export async function decryptBackup({ archivePath, credentialType, passphrase, r
 
     // Step 2: Unwrap the age private key using the vault key.
     // Full chain: passphrase → Argon2id → unwrap vault key → unwrap age private key → decrypt archive.
-    // Supports both new format (agePrivateKeyWrapped) and legacy format (agePrivateKey plaintext).
-    let agePrivateKey;
-    if (config.agePrivateKeyWrapped) {
-      const wrappedAgeKey = Buffer.from(config.agePrivateKeyWrapped, 'base64');
-      agePrivateKey = unwrapAgePrivateKey(wrappedAgeKey, vaultKey);
-    } else if (config.agePrivateKey) {
-      // Legacy config with plaintext age private key — accept but warn
-      agePrivateKey = config.agePrivateKey;
-    } else {
-      throw new Error('Missing age private key in config — was setup completed?');
+    if (!config.agePrivateKeyWrapped) {
+      throw new Error('Missing wrapped age private key in config — re-run lobster setup');
     }
+    const wrappedAgeKey = Buffer.from(config.agePrivateKeyWrapped, 'base64');
+    const agePrivateKey = unwrapAgePrivateKey(wrappedAgeKey, vaultKey);
 
     const tmpIdentityPath = path.join(os.tmpdir(), `lobster-identity-${Date.now()}`);
     try {
