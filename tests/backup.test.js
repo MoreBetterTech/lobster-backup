@@ -413,6 +413,23 @@ describe('Backup Script', () => {
       expect(unlinkCalls.some((p) => typeof p === 'string' && p.includes('.tar.gz') && !p.includes('.age'))).toBe(true);
     });
 
+    it('no Lobsterfile → warns loudly (restore cannot rebuild environment)', async () => {
+      fs.existsSync.mockImplementation((p) => {
+        if (typeof p === 'string' && p.includes('lobsterfile') && !p.includes('.env') && !p.includes('.json') && !p.includes('.lock') && !p.includes('.seed')) return false;
+        if (typeof p === 'string' && p.includes('.lock')) return false;
+        return true;
+      });
+
+      const result = await runBackup({
+        config: { backupPath: backupDir },
+        dryRun: true,
+      });
+
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringMatching(/lobsterfile|rebuild|environment/i)])
+      );
+    });
+
     it('no external manifest → proceeds with warning (internal-only backup)', async () => {
       fs.existsSync.mockImplementation((p) => {
         if (typeof p === 'string' && p.includes('external-manifest')) return false;

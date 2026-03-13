@@ -17,10 +17,11 @@ vi.mock('node:child_process');
 vi.mock('../src/crypto.js', () => ({
   derivePassphraseKey: vi.fn(),
   unwrapVaultKey: vi.fn(),
+  unwrapAgePrivateKey: vi.fn(),
   decryptArchive: vi.fn(),
 }));
 
-import { derivePassphraseKey, unwrapVaultKey, decryptArchive } from '../src/crypto.js';
+import { derivePassphraseKey, unwrapVaultKey, unwrapAgePrivateKey, decryptArchive } from '../src/crypto.js';
 
 describe('Restore — Decryption', () => {
   beforeEach(() => {
@@ -144,6 +145,66 @@ describe('Restore — Decryption', () => {
         },
       })
     ).rejects.toThrow(/wrong|incorrect|failed/i);
+  });
+
+  it('wrapped age private key → unwraps via vault key before decryption', async () => {
+    const fakeDerivedKey = Buffer.alloc(32, 0xAA);
+    const fakeVaultKey = Buffer.alloc(32, 0xBB);
+
+    derivePassphraseKey.mockResolvedValue(fakeDerivedKey);
+    unwrapVaultKey.mockResolvedValue(fakeVaultKey);
+    unwrapAgePrivateKey.mockReturnValue('AGE-SECRET-KEY-1UNWRAPPED');
+    decryptArchive.mockResolvedValue(Buffer.from('decrypted-archive'));
+
+    const result = await decryptBackup({
+      archivePath: '/backups/backup.tar.gz.age',
+      credentialType: 'passphrase',
+      passphrase: 'correct-passphrase',
+      config: {
+        argon2Salt: Buffer.alloc(32, 0x01).toString('base64'),
+        vaultKeyWrappedPassphrase: Buffer.alloc(60, 0x02).toString('base64'),
+        agePrivateKeyWrapped: Buffer.alloc(80, 0x04).toString('base64'),
+      },
+    });
+
+    expect(result.success).toBe(true);
+    // Vault key should be unwrapped first, then used to unwrap age private key
+    expect(unwrapAgePrivateKey).toHaveBeenCalledWith(expect.any(Buffer), fakeVaultKey);
+    // Decryption should use the unwrapped age private key
+    expect(fs.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('lobster-identity'),
+      expect.stringContaining('AGE-SECRET-KEY-1UNWRAPPED'),
+      { mode: 0o600 }
+    );
+  });
+
+  it('legacy config with plaintext agePrivateKey still works (backward compat)', async () => {
+    const fakeVaultKey = Buffer.alloc(32, 0xBB);
+
+    derivePassphraseKey.mockResolvedValue(Buffer.alloc(32, 0xAA));
+    unwrapVaultKey.mockResolvedValue(fakeVaultKey);
+    decryptArchive.mockResolvedValue(Buffer.from('decrypted-archive'));
+
+    const result = await decryptBackup({
+      archivePath: '/backups/backup.tar.gz.age',
+      credentialType: 'passphrase',
+      passphrase: 'correct-passphrase',
+      config: {
+        argon2Salt: Buffer.alloc(32, 0x01).toString('base64'),
+        vaultKeyWrappedPassphrase: Buffer.alloc(60, 0x02).toString('base64'),
+        agePrivateKey: 'AGE-SECRET-KEY-1LEGACYKEY',
+      },
+    });
+
+    expect(result.success).toBe(true);
+    // Should NOT call unwrapAgePrivateKey (legacy path)
+    expect(unwrapAgePrivateKey).not.toHaveBeenCalled();
+    // Should still use the plaintext key
+    expect(fs.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('lobster-identity'),
+      expect.stringContaining('AGE-SECRET-KEY-1LEGACYKEY'),
+      { mode: 0o600 }
+    );
   });
 
   it('corrupted archive → decryptArchive fails → clean error', async () => {

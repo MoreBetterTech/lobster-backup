@@ -301,6 +301,12 @@ export async function runBackup(options) {
       }
     }
     
+    // Warn loudly if no Lobsterfile exists — this means restore can't rebuild the environment
+    const lobsterfileCheckPath = path.join(os.homedir(), '.openclaw', 'lobsterfile');
+    if (!fs.existsSync(lobsterfileCheckPath)) {
+      warnings.push('⚠️  No Lobsterfile found! Restore will only restore files — it cannot rebuild packages, services, or system configuration. Run lobster setup or create ~/.openclaw/lobsterfile manually.');
+    }
+
     // Generate manifests
     const internalManifest = generateInternalManifest();
     

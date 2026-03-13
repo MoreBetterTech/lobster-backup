@@ -16,10 +16,11 @@ import {
   generateRecoveryKey as cryptoGenerateRecoveryKey,
   generateAgeKeypair,
   derivePassphraseKey,
-  wrapVaultKey
+  wrapVaultKey,
+  wrapAgePrivateKey
 } from './crypto.js';
 import { writeConfig } from './config.js';
-import { detectPlaceholders as lobsterfileDetectPlaceholders } from './lobsterfile.js';
+import { detectPlaceholders as lobsterfileDetectPlaceholders, initLobsterfile } from './lobsterfile.js';
 
 /**
  * Validate passphrase strength and confirmation
@@ -179,15 +180,18 @@ export async function runSetup(options) {
     }
   }
 
-  // 9. Write configuration
+  // 9. Wrap age private key with vault key (zero-knowledge: no plaintext key material in config)
+  const agePrivateKeyWrapped = wrapAgePrivateKey(ageKeypair.privateKey, vaultKeyBuffer);
+
+  // 10. Write configuration
   const config = {
     backupPath: resolvedBackupPath,
     vaultKeyWrappedPassphrase: vaultKeyWrappedPassphrase.toString('base64'),
     vaultKeyWrappedRecovery: vaultKeyWrappedRecovery.toString('base64'),
     argon2Salt: salt.toString('base64'),
-    // age keypair: public key is the encryption recipient, private key is for decryption
+    // age public key stored in plaintext (it's public), private key wrapped by vault key
     agePublicKey: ageKeypair.publicKey,
-    agePrivateKey: ageKeypair.privateKey,
+    agePrivateKeyWrapped: agePrivateKeyWrapped.toString('base64'),
     formatVersion: 1,
     schedule: {
       hourly: true,
@@ -198,6 +202,20 @@ export async function runSetup(options) {
   };
 
   writeConfig(config);
+
+  // 11. Initialize Lobsterfile if it doesn't exist
+  const lobsterfilePath = path.join(os.homedir(), '.openclaw', 'lobsterfile');
+  const seedPath = path.join(os.homedir(), '.openclaw', 'lobsterfile.seed');
+  const lobsterfileResult = initLobsterfile(lobsterfilePath, { seedPath });
+  
+  if (lobsterfileResult.created) {
+    io.write(`\n📝 Created Lobsterfile at ${lobsterfilePath}`);
+    if (lobsterfileResult.seeded) {
+      io.write('   (seeded from environment audit — review and refine as needed)');
+    }
+  } else {
+    io.write('\n📝 Lobsterfile already exists — not overwritten.');
+  }
 
   // Does NOT auto-modify AGENTS.md: Skills should not auto-modify core agent 
   // files. The snippet is printed; the human decides. This is a trust boundary.

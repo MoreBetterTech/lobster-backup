@@ -180,6 +180,19 @@ describe('Manifest — External', () => {
       expect(entry).toContain('git checkout');
       expect(entry).toContain('main');
     });
+
+    it('quotes paths in git clone entry (handles spaces in paths)', () => {
+      const entry = generateGitCloneEntry({
+        remoteUrl: 'https://github.com/user/repo.git',
+        localPath: '/home/testuser/my projects/repo',
+        ref: 'main',
+      });
+
+      // Paths must be quoted for bash safety
+      expect(entry).toContain('"/home/testuser/my projects/repo"');
+      expect(entry).toContain('cd "/home/testuser/my projects/repo"');
+      expect(entry).toContain('"main"');
+    });
   });
 
   // --- Symlinks ---

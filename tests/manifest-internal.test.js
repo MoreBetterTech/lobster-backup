@@ -148,6 +148,27 @@ describe('Manifest — Internal', () => {
     expect(paths.some((p) => p.includes('secret-notes.md'))).toBe(false);
   });
 
+  it('includes workspace subdirectories (freshkit, docker, etc.) — not just top-level .md files', () => {
+    const files = [
+      `${ocDir}/workspace/SOUL.md`,
+      `${ocDir}/workspace/MEMORY.md`,
+      `${ocDir}/workspace/freshkit/server.js`,
+      `${ocDir}/workspace/freshkit/.env`,
+      `${ocDir}/workspace/freshkit/agents/index.js`,
+      `${ocDir}/workspace/docker/docker-compose.yml`,
+    ];
+    mockOCTree(files);
+
+    const manifest = generateInternalManifest(ocDir);
+    const paths = manifest.map((e) => e.path || e);
+
+    expect(paths).toEqual(expect.arrayContaining([
+      expect.stringContaining('freshkit/server.js'),
+      expect.stringContaining('freshkit/.env'),
+      expect.stringContaining('docker/docker-compose.yml'),
+    ]));
+  });
+
   it('does not traverse excluded directories (performance)', () => {
     const files = [
       `${ocDir}/workspace/SOUL.md`,
