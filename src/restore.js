@@ -329,8 +329,17 @@ export function restoreFiles({ archiveDir, internalFiles, externalFiles, symlink
   }
 
   // Restore internal files to ~/.openclaw/
+  // Internal manifest may contain absolute paths from the backup machine
+  // (e.g. /home/ubuntu/.openclaw/agents/...). Archive stores files relative
+  // to ~/.openclaw/, so we strip any absolute prefix to get the archive path.
   if (internalFiles && internalFiles.length > 0) {
-    for (const relativePath of internalFiles) {
+    for (const filePath of internalFiles) {
+      let relativePath = filePath;
+      const ocSuffix = '/.openclaw/';
+      const ocIdx = filePath.indexOf(ocSuffix);
+      if (ocIdx !== -1) {
+        relativePath = filePath.substring(ocIdx + ocSuffix.length);
+      }
       const sourcePath = path.join(archiveDir, 'internal', relativePath);
       const targetPath = path.join(ocDir, relativePath);
       copyFile(sourcePath, targetPath);
@@ -340,25 +349,41 @@ export function restoreFiles({ archiveDir, internalFiles, externalFiles, symlink
   // Restore external files to their original absolute paths.
   // External manifest stores paths WITHOUT leading '/' (stripped during backup).
   // We prepend '/' here to reconstruct the absolute path.
+  // Graceful handling: external files may reference paths from the original machine
+  // (e.g. /home/ubuntu/... on a machine where the user is now /home/sean/).
+  // Missing source files or permission errors are logged and skipped rather than
+  // aborting the entire restore — external files are best-effort and the
+  // Lobsterfile is the authoritative rebuild path for system configuration.
+  const externalWarnings = [];
   if (externalFiles && externalFiles.length > 0) {
     for (const relativePath of externalFiles) {
       const sourcePath = path.join(archiveDir, 'external', relativePath);
       const targetPath = path.join('/', relativePath);
 
-      // Use sudo for system paths — avoids running entire restore as root
-      if (targetPath.startsWith('/etc/') || targetPath.startsWith('/var/')) {
-        const targetDir = path.dirname(targetPath);
-        execFileSync('sudo', ['mkdir', '-p', targetDir], { stdio: 'pipe' });
-        execFileSync('sudo', ['cp', sourcePath, targetPath], { stdio: 'pipe' });
-        if (preservePermissions) {
-          try {
-            const stats = fs.statSync(sourcePath);
-            const mode = (stats.mode & 0o7777).toString(8);
-            execFileSync('sudo', ['chmod', mode, targetPath], { stdio: 'pipe' });
-          } catch { /* best-effort */ }
+      // Skip if source doesn't exist in archive (may have been excluded during backup)
+      if (!fs.existsSync(sourcePath)) {
+        externalWarnings.push(`Skipped (not in archive): ${targetPath}`);
+        continue;
+      }
+
+      try {
+        // Use sudo for system paths — avoids running entire restore as root
+        if (targetPath.startsWith('/etc/') || targetPath.startsWith('/var/')) {
+          const targetDir = path.dirname(targetPath);
+          execFileSync('sudo', ['mkdir', '-p', targetDir], { stdio: 'pipe' });
+          execFileSync('sudo', ['cp', sourcePath, targetPath], { stdio: 'pipe' });
+          if (preservePermissions) {
+            try {
+              const stats = fs.statSync(sourcePath);
+              const mode = (stats.mode & 0o7777).toString(8);
+              execFileSync('sudo', ['chmod', mode, targetPath], { stdio: 'pipe' });
+            } catch { /* best-effort */ }
+          }
+        } else {
+          copyFile(sourcePath, targetPath);
         }
-      } else {
-        copyFile(sourcePath, targetPath);
+      } catch (error) {
+        externalWarnings.push(`Skipped (${error.code || 'error'}): ${targetPath}`);
       }
     }
   }
