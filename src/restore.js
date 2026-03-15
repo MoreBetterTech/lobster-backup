@@ -677,6 +677,29 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
       preservePermissions: true,
     });
 
+    // Step 8b: Restore user crontab if captured
+    const crontabPath = path.join(extractDir, 'crontab');
+    if (fs.existsSync(crontabPath)) {
+      const crontabContent = fs.readFileSync(crontabPath, 'utf8');
+      io.write('Restoring user crontab...\n');
+      try {
+        // Merge with existing crontab (sort -u deduplicates)
+        let existingCrontab = '';
+        try {
+          existingCrontab = execSync('crontab -l', { encoding: 'utf8', stdio: 'pipe' });
+        } catch { /* no existing crontab */ }
+        const merged = (existingCrontab + '\n' + crontabContent)
+          .split('\n')
+          .filter(line => line.trim())
+          .filter((line, i, arr) => arr.indexOf(line) === i)  // deduplicate
+          .join('\n') + '\n';
+        execSync('crontab -', { input: merged, stdio: 'pipe' });
+        io.write('  Crontab restored (merged with existing entries).\n');
+      } catch (error) {
+        io.write(`  ⚠️  Crontab restore failed: ${error.message}\n`);
+      }
+    }
+
     // Step 9: Handle Lobsterfile
     const lobsterfilePath = path.join(extractDir, 'lobsterfile');
     if (fs.existsSync(lobsterfilePath)) {

@@ -173,6 +173,19 @@ export async function createArchive(options) {
     // Stage files into tempDir using directory structure instead of --add-file/--transform.
     // This avoids GNU tar-specific flags and eliminates shell injection via filenames.
 
+    // Capture user crontab — system crontab entries (not OpenClaw's internal
+    // cron/jobs.json) would be lost on restore. Stored as a file in the archive
+    // so restore can replay it with `crontab`.
+    try {
+      const crontabContent = execSync('crontab -l', { encoding: 'utf8', stdio: 'pipe' });
+      if (crontabContent.trim()) {
+        fs.writeFileSync(path.join(tempDir, 'crontab'), crontabContent);
+        checksumFile(path.join(tempDir, 'crontab'), 'crontab');
+      }
+    } catch {
+      // No crontab for this user — that's fine, skip silently
+    }
+
     // Stage lobsterfile if provided
     if (lobsterfilePath && fs.existsSync(lobsterfilePath)) {
       fs.copyFileSync(lobsterfilePath, path.join(tempDir, 'lobsterfile'));

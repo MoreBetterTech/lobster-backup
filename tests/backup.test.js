@@ -198,6 +198,50 @@ describe('Backup Script', () => {
       expect(envCopy).toBeDefined();
     });
 
+    it('captures user crontab in archive (#11)', async () => {
+      // Mock crontab -l returning entries
+      execSync.mockImplementation((cmd) => {
+        if (cmd === 'crontab -l') return '*/5 * * * * /usr/bin/python3 watcher.py\n';
+        if (cmd.includes('openclaw --version')) return 'OpenClaw 2026.3.12';
+        return '';
+      });
+
+      await createArchive({
+        internalManifest: [],
+        externalManifest: [],
+        backupDir,
+      });
+
+      const writeCalls = fs.writeFileSync.mock.calls;
+      const crontabWrite = writeCalls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('crontab')
+      );
+      expect(crontabWrite).toBeDefined();
+      expect(crontabWrite[1]).toContain('watcher.py');
+    });
+
+    it('skips crontab capture when no crontab exists (#11)', async () => {
+      // Mock crontab -l throwing (no crontab for user)
+      execSync.mockImplementation((cmd) => {
+        if (cmd === 'crontab -l') throw new Error('no crontab for user');
+        if (cmd.includes('openclaw --version')) return 'OpenClaw 2026.3.12';
+        return '';
+      });
+
+      await createArchive({
+        internalManifest: [],
+        externalManifest: [],
+        backupDir,
+      });
+
+      const writeCalls = fs.writeFileSync.mock.calls;
+      const crontabWrite = writeCalls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('/crontab')
+      );
+      // Should not write crontab file when none exists
+      expect(crontabWrite).toBeUndefined();
+    });
+
     it('writes manifest-internal.json and manifest-external.json', async () => {
       await createArchive({
         internalManifest: ['file1'],
