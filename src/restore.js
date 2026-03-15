@@ -594,6 +594,24 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
   const archivePath = selection.selectedPath;
   io.write(`Selected backup: ${path.basename(archivePath)}\n`);
 
+  // Step 1b: If no config provided, try loading from sidecar file (.meta.json)
+  // This solves the chicken/egg problem: the config needed to decrypt is normally
+  // inside the encrypted backup, but the sidecar stores it alongside the archive.
+  if (!config || !config.argon2Salt) {
+    const sidecarPath = archivePath.replace(/\.age$/, '.meta.json');
+    if (fs.existsSync(sidecarPath)) {
+      io.write('Loading decryption metadata from sidecar file...\n');
+      const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf8'));
+      config = { ...config, ...sidecar };
+    } else {
+      throw new Error(
+        'No lobster-backup.json config and no sidecar .meta.json found. ' +
+        'Cannot decrypt without key-wrapping metadata. ' +
+        'Copy lobster-backup.json from the original machine or place the .meta.json sidecar next to the backup file.'
+      );
+    }
+  }
+
   // Step 2: Preflight checks
   const installCheck = checkExistingInstall();
   if (installCheck.existingInstall) {

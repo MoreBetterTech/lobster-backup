@@ -390,6 +390,23 @@ export async function runBackup(options) {
       recipients: config.agePublicKey ? [config.agePublicKey] : (config.recipients || [])
     });
     
+    // Write decryption sidecar alongside the encrypted archive.
+    // Contains the key-wrapping metadata needed to decrypt without
+    // ~/.openclaw/lobster-backup.json (solves the chicken/egg problem where
+    // the config needed to decrypt is inside the encrypted backup).
+    // All fields are safe unencrypted — keys are wrapped, not plaintext.
+    const sidecarPath = encryptedPath.replace(/\.age$/, '.meta.json');
+    const sidecar = {
+      formatVersion: config.formatVersion || 1,
+      argon2Salt: config.argon2Salt,
+      vaultKeyWrappedPassphrase: config.vaultKeyWrappedPassphrase,
+      vaultKeyWrappedRecovery: config.vaultKeyWrappedRecovery,
+      agePublicKey: config.agePublicKey,
+      agePrivateKeyWrapped: config.agePrivateKeyWrapped,
+      timestamp: new Date().toISOString(),
+    };
+    fs.writeFileSync(sidecarPath, JSON.stringify(sidecar, null, 2));
+
     // Plaintext cleanup on encryption success: Security-critical.
     // If age succeeds, we must delete the unencrypted tarball with secrets.
     fs.unlinkSync(tarballPath);
