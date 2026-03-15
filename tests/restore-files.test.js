@@ -46,6 +46,9 @@ describe('Restore — File Restoration', () => {
 
   it('external files restored to original absolute paths via execFileSync (no shell injection)', () => {
     fs.mkdirSync.mockReturnValue(undefined);
+    // existsSync must return true for source files so they aren't skipped
+    fs.existsSync.mockReturnValue(true);
+    fs.statSync.mockReturnValue({ mode: 0o644 });
     execFileSync.mockReturnValue('');
 
     restoreFiles({
@@ -57,12 +60,15 @@ describe('Restore — File Restoration', () => {
     // Should use execFileSync (not execSync) for sudo commands
     const sudoCalls = execFileSync.mock.calls.filter((c) => c[0] === 'sudo');
     expect(sudoCalls.length).toBeGreaterThan(0);
-    // Verify actual paths are in the commands
+    // Verify actual paths are in the commands — args are passed as array elements
     const cpCalls = sudoCalls.filter((c) => c[1].includes('cp'));
-    expect(cpCalls.some((c) => c[1].includes('/etc/caddy/Caddyfile'))).toBe(true);
+    expect(cpCalls.some((c) => c[1].some(arg => arg.includes('/etc/caddy/Caddyfile')))).toBe(true);
   });
 
   it('external file restore to system paths (/etc/, /var/) uses sudo via execFileSync', () => {
+    // existsSync must return true for source files so they aren't skipped
+    fs.existsSync.mockReturnValue(true);
+    fs.statSync.mockReturnValue({ mode: 0o644 });
     execFileSync.mockReturnValue('');
 
     restoreFiles({
@@ -73,7 +79,7 @@ describe('Restore — File Restoration', () => {
 
     const sudoCalls = execFileSync.mock.calls.filter((c) => c[0] === 'sudo');
     expect(sudoCalls.length).toBeGreaterThanOrEqual(1);
-    // Should have a mkdir and a cp call via sudo
+    // Args are passed as array: ['sudo', ['mkdir', '-p', dir]] or ['sudo', ['cp', src, dest]]
     const mkdirCall = sudoCalls.find((c) => c[1].includes('mkdir'));
     const cpCall = sudoCalls.find((c) => c[1].includes('cp'));
     expect(mkdirCall).toBeDefined();
