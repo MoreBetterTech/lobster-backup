@@ -339,6 +339,75 @@ export function presentFindings(findings) {
 }
 
 /**
+ * Verify that external dependencies in the manifest have corresponding
+ * install/enable steps in the Lobsterfile. Warns about gaps that would
+ * cause restore to fail (e.g., Caddyfile restored but Caddy not installed).
+ * 
+ * @param {string[]} externalManifest - Array of registered external paths
+ * @param {string} lobsterfileContent - Content of the Lobsterfile
+ * @returns {object[]} Array of warnings { path, package, type, message }
+ */
+export function verifyLobsterfileCoverage(externalManifest, lobsterfileContent) {
+  const warnings = [];
+  const lfLower = lobsterfileContent.toLowerCase();
+  
+  // Map of path patterns to expected packages/services
+  const pathToPackage = [
+    { pattern: /\/caddy\//i, pkg: 'caddy', service: 'caddy' },
+    { pattern: /\/nginx\//i, pkg: 'nginx', service: 'nginx' },
+    { pattern: /\/apache2?\//i, pkg: 'apache2', service: 'apache2' },
+    { pattern: /\/redis\//i, pkg: 'redis-server', service: 'redis' },
+    { pattern: /\/postgresql\//i, pkg: 'postgresql', service: 'postgresql' },
+    { pattern: /\/mysql\//i, pkg: 'mysql-server', service: 'mysql' },
+    { pattern: /\/docker\//i, pkg: 'docker', service: 'docker' },
+  ];
+  
+  // Check each external path for known service patterns
+  for (const extPath of externalManifest) {
+    for (const { pattern, pkg, service } of pathToPackage) {
+      if (pattern.test(extPath)) {
+        // Check if Lobsterfile mentions installing or enabling this package
+        const hasInstall = lfLower.includes(`install`) && lfLower.includes(pkg);
+        const hasEnable = lfLower.includes(`enable`) && lfLower.includes(service);
+        
+        if (!hasInstall) {
+          warnings.push({
+            path: extPath,
+            package: pkg,
+            type: 'missing-install',
+            message: `${extPath} registered but no '${pkg}' install found in Lobsterfile`,
+          });
+        }
+        if (!hasEnable) {
+          warnings.push({
+            path: extPath,
+            package: service,
+            type: 'missing-enable',
+            message: `${extPath} registered but no '${service}' service enable found in Lobsterfile`,
+          });
+        }
+        break;  // Only match first pattern per path
+      }
+    }
+    
+    // Check systemd units — the service file itself should have an enable step
+    if (extPath.includes('/systemd/') && extPath.endsWith('.service')) {
+      const serviceName = path.basename(extPath);
+      if (!lfLower.includes(serviceName.replace('.service', ''))) {
+        warnings.push({
+          path: extPath,
+          package: serviceName,
+          type: 'missing-service',
+          message: `${extPath} registered but '${serviceName}' not referenced in Lobsterfile`,
+        });
+      }
+    }
+  }
+  
+  return warnings;
+}
+
+/**
  * Register confirmed paths to the external manifest
  * @param {string[]} confirmedPaths - Array of paths to register
  */
