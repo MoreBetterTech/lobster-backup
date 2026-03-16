@@ -830,7 +830,14 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
       const reviewResult = await displayLobsterfile(substitutedContent, io);
       if (reviewResult.confirmed) {
         io.write('Executing Lobsterfile...\n');
-        await executeLobsterfile({ content: lobsterfileContent, envVars, io });
+        const execResult = await executeLobsterfile({ content: lobsterfileContent, envVars, io, continueOnError: true });
+        if (execResult.failures && execResult.failures.length > 0) {
+          io.write(`\n⚠️  ${execResult.failures.length} step(s) failed during Lobsterfile execution:\n`);
+          for (const f of execResult.failures) {
+            io.write(`  ✗ ${f.step}\n    → ${f.error.split('\n')[0]}\n`);
+          }
+          io.write('\nReview the failures above and run failed steps manually if needed.\n');
+        }
       } else {
         io.write('Lobsterfile execution skipped by user.\n');
       }
