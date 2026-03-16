@@ -14,6 +14,39 @@ import { decryptArchive, derivePassphraseKey, unwrapVaultKey, unwrapAgePrivateKe
 import { substituteVariables, parseEnvFile } from './lobsterfile-env.js';
 
 /**
+ * Restore captured apt source files and keyrings to their system paths.
+ * Must run BEFORE the Lobsterfile executes, because `apt install caddy`
+ * needs the Caddy repo to be configured first.
+ * 
+ * @param {string} aptSourcesDir - Directory containing captured apt-sources/
+ */
+export function restoreAptSources(aptSourcesDir) {
+  const sourcesListDir = path.join(aptSourcesDir, 'sources.list.d');
+  const keyringsDir = path.join(aptSourcesDir, 'keyrings');
+  
+  // Restore keyrings first (sources reference them via signed-by)
+  if (fs.existsSync(keyringsDir)) {
+    const keyrings = fs.readdirSync(keyringsDir);
+    for (const keyring of keyrings) {
+      const src = path.join(keyringsDir, keyring);
+      const dest = path.join('/usr/share/keyrings', keyring);
+      execFileSync('sudo', ['cp', src, dest], { stdio: 'pipe' });
+      execFileSync('sudo', ['chmod', '644', dest], { stdio: 'pipe' });
+    }
+  }
+  
+  // Restore source files
+  if (fs.existsSync(sourcesListDir)) {
+    const sources = fs.readdirSync(sourcesListDir);
+    for (const source of sources) {
+      const src = path.join(sourcesListDir, source);
+      const dest = path.join('/etc/apt/sources.list.d', source);
+      execFileSync('sudo', ['cp', src, dest], { stdio: 'pipe' });
+    }
+  }
+}
+
+/**
  * List available backup files in the backup directory
  * @param {string} backupDir - Directory containing backup files
  * @returns {Array} Array of backup objects with {filename, timestamp, size, path}
@@ -695,7 +728,24 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
       preservePermissions: true,
     });
 
-    // Step 8b: Restore user crontab if captured
+    // Step 8b: Restore apt sources and keyrings (before Lobsterfile runs apt install)
+    // Third-party packages need their repos configured before `apt install` works.
+    // This replays the sources.list.d/ entries and keyrings captured during backup.
+    const aptSourcesDir = path.join(extractDir, 'apt-sources');
+    if (fs.existsSync(aptSourcesDir)) {
+      io.write('Restoring apt sources and keyrings...\n');
+      try {
+        restoreAptSources(aptSourcesDir);
+        io.write('  Apt sources restored. Running apt update...\n');
+        execSync('sudo apt-get update', { stdio: 'pipe' });
+        io.write('  Done.\n');
+      } catch (error) {
+        io.write(`  ⚠️  Apt source restore failed: ${error.message}\n`);
+        io.write('  Lobsterfile may fail to install third-party packages.\n');
+      }
+    }
+
+    // Step 8c: Restore user crontab if captured
     const crontabPath = path.join(extractDir, 'crontab');
     if (fs.existsSync(crontabPath)) {
       const crontabContent = fs.readFileSync(crontabPath, 'utf8');

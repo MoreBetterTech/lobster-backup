@@ -13,6 +13,70 @@ import { generateInternalManifest, readExternalManifest, detectGitRepo } from '.
 import { detectNewVariables, parseEnvFile } from './lobsterfile-env.js';
 import { encryptArchive } from './crypto.js';
 
+/**
+ * Capture apt source files and their referenced keyrings.
+ * 
+ * Third-party packages (Caddy, Node.js, gh) need custom apt repos to install.
+ * The environment audit discovers they're installed but not HOW. This function
+ * snapshots /etc/apt/sources.list.d/ (excluding default OS sources) and any
+ * keyring files they reference via signed-by directives.
+ * 
+ * @returns {object} { sourceFiles: string[], keyringFiles: string[] }
+ */
+export function captureAptSources() {
+  const sourcesDir = '/etc/apt/sources.list.d';
+  const sourceFiles = [];
+  const keyringFiles = new Set();
+  
+  // Default OS source patterns to skip — these come with the OS and don't
+  // need to be restored. We only want third-party repos.
+  const defaultPatterns = [
+    /^ubuntu/i,
+    /^debian/i,
+  ];
+  
+  if (!fs.existsSync(sourcesDir)) {
+    return { sourceFiles: [], keyringFiles: [] };
+  }
+  
+  const entries = fs.readdirSync(sourcesDir);
+  
+  for (const entry of entries) {
+    // Skip default OS source files
+    if (defaultPatterns.some(p => p.test(entry))) {
+      continue;
+    }
+    
+    // Only process .list, .sources files (not .save backups)
+    if (!entry.endsWith('.list') && !entry.endsWith('.sources')) {
+      continue;
+    }
+    
+    const fullPath = path.join(sourcesDir, entry);
+    sourceFiles.push(fullPath);
+    
+    // Parse the file to find signed-by keyring references
+    try {
+      const content = fs.readFileSync(fullPath, 'utf-8');
+      
+      // Match both formats:
+      //   deb [signed-by=/usr/share/keyrings/foo.gpg] ...  (.list format)
+      //   Signed-By: /usr/share/keyrings/foo.gpg            (.sources format)
+      const signedByMatches = content.matchAll(/signed-by[=:]\s*([^\]\s,]+)/gi);
+      for (const match of signedByMatches) {
+        const keyringPath = match[1].trim();
+        if (fs.existsSync(keyringPath)) {
+          keyringFiles.add(keyringPath);
+        }
+      }
+    } catch {
+      // If we can't read the file, just include it without keyring extraction
+    }
+  }
+  
+  return { sourceFiles, keyringFiles: Array.from(keyringFiles) };
+}
+
 let lockFilePath;
 
 /**
@@ -184,6 +248,39 @@ export async function createArchive(options) {
       }
     } catch {
       // No crontab for this user — that's fine, skip silently
+    }
+
+    // Capture apt sources and referenced keyrings.
+    // Third-party packages (Caddy, Node.js, gh CLI) require custom apt repos.
+    // `apt-mark showmanual` discovers the package is installed but NOT how it
+    // was installed. Without the repo + keyring, `apt install caddy` on a fresh
+    // box fails with "package not found." Snapshotting sources.list.d/ and the
+    // keyrings they reference solves this generically for any third-party repo.
+    try {
+      const aptSources = captureAptSources();
+      if (aptSources.sourceFiles.length > 0 || aptSources.keyringFiles.length > 0) {
+        const aptStageDir = path.join(tempDir, 'apt-sources');
+        
+        // Stage source files
+        for (const sf of aptSources.sourceFiles) {
+          const destDir = path.join(aptStageDir, 'sources.list.d');
+          fs.mkdirSync(destDir, { recursive: true });
+          const destPath = path.join(destDir, path.basename(sf));
+          fs.copyFileSync(sf, destPath);
+          checksumFile(destPath, `apt-sources/sources.list.d/${path.basename(sf)}`);
+        }
+        
+        // Stage keyring files
+        for (const kf of aptSources.keyringFiles) {
+          const destDir = path.join(aptStageDir, 'keyrings');
+          fs.mkdirSync(destDir, { recursive: true });
+          const destPath = path.join(destDir, path.basename(kf));
+          fs.copyFileSync(kf, destPath);
+          checksumFile(destPath, `apt-sources/keyrings/${path.basename(kf)}`);
+        }
+      }
+    } catch {
+      // Apt source capture is best-effort — don't fail the backup
     }
 
     // Stage lobsterfile if provided
