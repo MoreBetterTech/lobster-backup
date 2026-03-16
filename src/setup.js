@@ -391,12 +391,19 @@ export async function runEnvironmentAudit(outputDir) {
     });
     try {
       const npmJson = JSON.parse(npmOutput);
-      // Filter out local-linked packages (resolved to file: paths).
-      // These are skills/local projects, not npm registry packages.
-      // Installing them via `npm install -g <name>` would fail with 404.
-      results.npmPackages = Object.entries(npmJson.dependencies || {})
-        .filter(([name, info]) => !info.resolved || !info.resolved.startsWith('file:'))
-        .map(([name]) => name);
+      // Separate registry packages from local-linked ones.
+      // Local-linked packages (resolved to file: paths) can't be installed
+      // via `npm install -g <name>` — they'd 404 on the registry.
+      // Instead they need `npm link` from their local path after restore.
+      results.npmPackages = [];
+      results.npmLocalPackages = [];
+      for (const [name, info] of Object.entries(npmJson.dependencies || {})) {
+        if (info.resolved && info.resolved.startsWith('file:')) {
+          results.npmLocalPackages.push({ name, path: info.resolved.replace('file:', '') });
+        } else {
+          results.npmPackages.push(name);
+        }
+      }
     } catch {
       // Fallback: parse tree output, strip box-drawing chars
       results.npmPackages = npmOutput.split('\n')
@@ -490,11 +497,20 @@ export async function runEnvironmentAudit(outputDir) {
     }
   }
 
-  // Add npm packages
+  // Add npm packages (registry)
   if (results.npmPackages.length > 0) {
     seedContent += '# Global npm packages\n';
     for (const pkg of results.npmPackages) {
       seedContent += `sudo npm install -g ${pkg}\n`;
+    }
+    seedContent += '\n';
+  }
+
+  // Add local-linked npm packages (restored from backup, just need re-linking)
+  if (results.npmLocalPackages && results.npmLocalPackages.length > 0) {
+    seedContent += '# Local npm packages (re-link after restore)\n';
+    for (const { name, path: pkgPath } of results.npmLocalPackages) {
+      seedContent += `cd ${pkgPath} && sudo npm link\n`;
     }
     seedContent += '\n';
   }
