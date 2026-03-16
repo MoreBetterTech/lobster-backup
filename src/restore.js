@@ -528,6 +528,15 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
   // sudo in the Lobsterfile provides per-command privilege escalation with 
   // syslog audit trail. Running the entire restore as root violates 
   // least-privilege and removes the audit benefit.
+  //
+  // DEBIAN_FRONTEND=noninteractive: only set when the TARGET system is
+  // Debian-family. dpkg's debconf prompts fail without a TTY; this env var
+  // tells debconf to skip interactive dialogs. On RHEL/Arch/Alpine this
+  // variable is meaningless — their package managers don't use debconf.
+  const targetOS = detectOS();
+  const execEnv = targetOS.family === 'debian'
+    ? { ...process.env, DEBIAN_FRONTEND: 'noninteractive' }
+    : { ...process.env };
   try {
     if (continueOnError) {
       // --continue-on-error as opt-in: For experienced users who know which 
@@ -539,7 +548,7 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
       
       for (const line of lines) {
         try {
-          execSync(line, { stdio: 'pipe' });
+          execSync(line, { stdio: 'pipe', env: execEnv });
         } catch (error) {
           failures.push({
             step: line,
@@ -556,7 +565,7 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
       // the script likely means subsequent steps will fail too (e.g., if apt 
       // install fails, the service that depends on it won't start). Continuing 
       // wastes time and potentially leaves the system in a worse state.
-      execSync(`bash ${tempPath}`, { stdio: 'pipe' });
+      execSync(`bash ${tempPath}`, { stdio: 'pipe', env: execEnv });
     }
   } catch (error) {
     exitCode = 1;

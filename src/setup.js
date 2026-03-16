@@ -391,7 +391,12 @@ export async function runEnvironmentAudit(outputDir) {
     });
     try {
       const npmJson = JSON.parse(npmOutput);
-      results.npmPackages = Object.keys(npmJson.dependencies || {});
+      // Filter out local-linked packages (resolved to file: paths).
+      // These are skills/local projects, not npm registry packages.
+      // Installing them via `npm install -g <name>` would fail with 404.
+      results.npmPackages = Object.entries(npmJson.dependencies || {})
+        .filter(([name, info]) => !info.resolved || !info.resolved.startsWith('file:'))
+        .map(([name]) => name);
     } catch {
       // Fallback: parse tree output, strip box-drawing chars
       results.npmPackages = npmOutput.split('\n')
@@ -489,7 +494,7 @@ export async function runEnvironmentAudit(outputDir) {
   if (results.npmPackages.length > 0) {
     seedContent += '# Global npm packages\n';
     for (const pkg of results.npmPackages) {
-      seedContent += `npm install -g ${pkg}\n`;
+      seedContent += `sudo npm install -g ${pkg}\n`;
     }
     seedContent += '\n';
   }
