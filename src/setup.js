@@ -335,42 +335,106 @@ export async function runEnvironmentAudit(outputDir) {
     // dpkg --get-selections returns EVERY package (hundreds of base system packages)
     // which is noise. apt-mark showmanual returns only what was explicitly installed,
     // which is what needs to go in the Lobsterfile.
+    //
+    // Even apt-mark showmanual includes base system packages (bash, grep, login)
+    // and distro/cloud-specific packages (linux-aws, ubuntu-server, cloud-init).
+    // These ship with the OS image and don't need to be in the Lobsterfile —
+    // they'll be there on any fresh install of the same OS. Filter them out.
     const aptOutput = execSync('apt-mark showmanual 2>/dev/null || dpkg --get-selections | grep -v deinstall', { 
       encoding: 'utf-8', 
       stdio: 'pipe' 
     });
+    
+    // Base system packages to exclude — these come with any minimal OS install
+    // and don't need to be restored. Patterns match package name prefixes.
+    const BASE_PACKAGE_PATTERNS = [
+      /^base-files$/, /^bash$/, /^bsdutils$/, /^coreutils$/,
+      /^dash$/, /^diffutils$/, /^findutils$/, /^grep$/, /^gzip$/,
+      /^hostname$/, /^init$/, /^login$/, /^ncurses-/,
+      /^util-linux$/, /^sed$/, /^tar$/,
+      // Kernel and boot packages (distro/arch-specific)
+      /^linux-/, /^grub-/, /^shim-signed$/,
+      // Cloud/platform packages (come with the cloud image)
+      /^cloud-init$/, /^ec2-/, /^amazon-/,
+      // Distro meta-packages
+      /^ubuntu-minimal$/, /^ubuntu-server$/, /^ubuntu-standard$/,
+      /^debian-/, 
+      // Snap/systemd infra
+      /^snapd$/, /^snap\./,
+      // Low-level libs that are dependencies, not user choices
+      /^libeatmydata/, /^libwrap/, /^eatmydata$/,
+      // SSH (comes with server images)
+      /^openssh-/,
+      // Other base infra
+      /^ca-certificates$/, /^fuse3?$/, /^irqbalance$/,
+      /^python-babel/, /^python3-babel/, /^python3-jinja2/,
+      /^python3-json/, /^python3-markupsafe/, /^python3-pyrsistent/,
+      /^ssh-import-id$/,
+    ];
+    
     results.packages = aptOutput.trim().split('\n')
       .filter(line => line.trim())
-      .map(line => line.split(/\s/)[0]);  // handles both apt-mark and dpkg output
+      .map(line => line.split(/\s/)[0])
+      .filter(pkg => !BASE_PACKAGE_PATTERNS.some(p => p.test(pkg)));
   } catch (error) {
     // Gracefully handle missing dpkg/apt-mark
   }
 
   try {
-    // Global npm packages
-    const npmOutput = execSync('npm list -g --depth=0', { 
+    // Global npm packages.
+    // Use --json for reliable parsing — the default tree format includes
+    // box-drawing characters (├──, └──) that are NOT valid npm package names.
+    // Previous bug: seed captured "npm install -g ├── lobster-backup" literally.
+    const npmOutput = execSync('npm list -g --depth=0 --json 2>/dev/null || npm list -g --depth=0', { 
       encoding: 'utf-8', 
       stdio: 'pipe' 
     });
-    // Parse npm output to extract package names
-    results.npmPackages = npmOutput.split('\n')
-      .filter(line => line.includes('@'))
-      .map(line => line.split('@')[0].trim())
-      .filter(pkg => pkg && pkg !== '');
+    try {
+      const npmJson = JSON.parse(npmOutput);
+      results.npmPackages = Object.keys(npmJson.dependencies || {});
+    } catch {
+      // Fallback: parse tree output, strip box-drawing chars
+      results.npmPackages = npmOutput.split('\n')
+        .filter(line => line.includes('@'))
+        .map(line => line.replace(/[├└─┬│ ]+/g, '').trim())
+        .map(line => line.split('@')[0])
+        .filter(pkg => pkg && pkg.length > 0 && !pkg.includes('/'));
+    }
   } catch (error) {
     // Gracefully handle missing npm
   }
 
   try {
-    // Enabled systemd services
+    // Enabled systemd services.
+    // Filter to only user-relevant services — skip OS infra (cloud-init, snapd,
+    // apparmor, systemd-*, getty@, etc.) that come enabled by default.
+    // The Lobsterfile should only enable services the user explicitly set up.
     const systemctlOutput = execSync('systemctl list-unit-files --state=enabled', { 
       encoding: 'utf-8', 
       stdio: 'pipe' 
     });
+    
+    const BASE_SERVICE_PATTERNS = [
+      /^apparmor/, /^apport/, /^blk-availability/,
+      /^chrony/, /^cloud-/, /^console-setup/, /^cron\./,
+      /^dmesg/, /^e2scrub/, /^ec2-/, /^finalrd/,
+      /^getty@/, /^grub-/, /^hibinit/,
+      /^irqbalance/, /^keyboard-setup/, /^lvm2/,
+      /^ModemManager/, /^multipathd/,
+      /^networkd-dispatcher/, /^open-iscsi/, /^open-vm-tools/,
+      /^pollinate/, /^rsyslog/,
+      /^secureboot/, /^setvtrgb/,
+      /^snap\./, /^snapd/,
+      /^sysstat/, /^systemd-/,
+      /^ua-reboot/, /^ubuntu-advantage/, /^udisks2/,
+      /^ufw/, /^unattended-upgrades/, /^vgauth/,
+    ];
+    
     results.services = systemctlOutput.split('\n')
       .filter(line => line.includes('enabled'))
       .map(line => line.split(/\s+/)[0])
-      .filter(service => service && service.endsWith('.service'));
+      .filter(service => service && service.endsWith('.service'))
+      .filter(service => !BASE_SERVICE_PATTERNS.some(p => p.test(service)));
   } catch (error) {
     // Gracefully handle missing systemctl
   }
