@@ -12,6 +12,8 @@ import { createHash } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
 import { decryptArchive, derivePassphraseKey, unwrapVaultKey, unwrapAgePrivateKey } from './crypto.js';
 import { substituteVariables, parseEnvFile } from './lobsterfile-env.js';
+import { detectOS, compareOS } from './os-detect.js';
+import { translateLobsterfile } from './lobsterfile-translate.js';
 
 /**
  * Restore captured apt source files and keyrings to their system paths.
@@ -771,7 +773,39 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
     // Step 9: Handle Lobsterfile
     const lobsterfilePath = path.join(extractDir, 'lobsterfile');
     if (fs.existsSync(lobsterfilePath)) {
-      const lobsterfileContent = fs.readFileSync(lobsterfilePath, 'utf8');
+      let lobsterfileContent = fs.readFileSync(lobsterfilePath, 'utf8');
+
+      // Step 9a: OS comparison — detect cross-family migrations
+      // If the backup was made on Ubuntu but we're restoring to Rocky Linux,
+      // the Lobsterfile's apt commands need to become dnf commands.
+      const targetOS = detectOS();
+      if (meta && meta.os) {
+        const osComparison = compareOS(meta.os, targetOS);
+        
+        for (const warning of osComparison.warnings) {
+          io.write(`\n⚠️  ${warning}\n`);
+        }
+        
+        if (osComparison.translationNeeded) {
+          io.write('\n🔄 Translating Lobsterfile commands for target system...\n');
+          const translation = translateLobsterfile(lobsterfileContent, meta.os.family, targetOS.family);
+          
+          if (translation.changes > 0) {
+            io.write(`   ${translation.changes} command(s) translated (${meta.os.family} → ${targetOS.family})\n`);
+            for (const w of translation.warnings) {
+              io.write(`   ⚠️  ${w}\n`);
+            }
+            lobsterfileContent = translation.translated;
+          } else {
+            io.write('   No translatable commands found.\n');
+          }
+        }
+        
+        if (!osComparison.compatible) {
+          io.write('\n❌ Cross-platform restore is not supported. Lobsterfile will not be executed.\n');
+          io.write('   Review and adapt the Lobsterfile manually.\n');
+        }
+      }
 
       // Load env vars
       const envFilePath = path.join(extractDir, 'lobsterfile.env');

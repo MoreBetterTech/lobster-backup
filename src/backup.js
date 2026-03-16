@@ -12,6 +12,7 @@ import { execSync, execFileSync } from 'node:child_process';
 import { generateInternalManifest, readExternalManifest, detectGitRepo } from './manifest.js';
 import { detectNewVariables, parseEnvFile } from './lobsterfile-env.js';
 import { encryptArchive } from './crypto.js';
+import { detectOS } from './os-detect.js';
 
 /**
  * Capture apt source files and their referenced keyrings.
@@ -333,11 +334,22 @@ export async function createArchive(options) {
       }
     }
 
-    // Write meta.json last so it includes all computed checksums
+    // Write meta.json last so it includes all computed checksums.
+    // OS info captured here so restore can detect cross-family migrations
+    // and translate Lobsterfile commands (e.g. apt → dnf).
+    const sourceOS = detectOS();
     const meta = {
       ocVersion,
       timestamp: new Date().toISOString(),
       formatVersion: 1,
+      os: {
+        id: sourceOS.id,
+        name: sourceOS.name,
+        version: sourceOS.version,
+        family: sourceOS.family,
+        arch: sourceOS.arch,
+        pretty: sourceOS.pretty,
+      },
       checksums: fileChecksums
     };
     fs.writeFileSync(path.join(tempDir, 'meta.json'), JSON.stringify(meta, null, 2));
