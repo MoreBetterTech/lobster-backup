@@ -498,10 +498,12 @@ export async function runEnvironmentAudit(outputDir) {
   }
 
   // Add npm packages (registry)
+  // No sudo: nvm installs put the global prefix in ~/.nvm which is user-owned.
+  // System Node installs may need sudo, but the user can escalate manually.
   if (results.npmPackages.length > 0) {
     seedContent += '# Global npm packages\n';
     for (const pkg of results.npmPackages) {
-      seedContent += `sudo npm install -g ${pkg}\n`;
+      seedContent += `npm install -g ${pkg}\n`;
     }
     seedContent += '\n';
   }
@@ -510,7 +512,7 @@ export async function runEnvironmentAudit(outputDir) {
   if (results.npmLocalPackages && results.npmLocalPackages.length > 0) {
     seedContent += '# Local npm packages (re-link after restore)\n';
     for (const { name, path: pkgPath } of results.npmLocalPackages) {
-      seedContent += `cd ${pkgPath} && sudo npm link\n`;
+      seedContent += `cd ${pkgPath} && npm link\n`;
     }
     seedContent += '\n';
   }

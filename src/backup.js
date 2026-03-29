@@ -514,7 +514,7 @@ export async function runBackup(options) {
       agePrivateKeyWrapped: config.agePrivateKeyWrapped,
       timestamp: new Date().toISOString(),
     };
-    fs.writeFileSync(sidecarPath, JSON.stringify(sidecar, null, 2));
+    fs.writeFileSync(sidecarPath, JSON.stringify(sidecar, null, 2), { mode: 0o600 });
 
     // Plaintext cleanup on encryption success: Security-critical.
     // If age succeeds, we must delete the unencrypted tarball with secrets.

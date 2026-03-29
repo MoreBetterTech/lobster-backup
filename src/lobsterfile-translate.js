@@ -243,10 +243,15 @@ export function translateLobsterfile(content, sourceFamily, targetFamily) {
   // treated as single logical commands for translation.
   const logicalLines = joinContinuationLines(lines);
   
-  // First pass: identify known repo setup blocks for recipe replacement
+  // First pass: identify known repo setup blocks for recipe replacement.
+  // detect() may fire on any line within a recipe block (not necessarily the first).
+  // When that happens, scan backward to find the block start so the full source
+  // recipe is matched and marked for replacement.
   const skipIndices = new Set();
+  const recipeInsertions = new Map(); // index → target recipe lines to emit
   
   for (let i = 0; i < logicalLines.length; i++) {
+    if (skipIndices.has(i)) continue;
     const line = logicalLines[i].text.trim();
     if (!line || line.startsWith('#')) continue;
     
@@ -256,12 +261,29 @@ export function translateLobsterfile(content, sourceFamily, targetFamily) {
         const targetRecipe = recipe[targetFamily] || [];
         
         if (targetRecipe.length > 0 && sourceRecipe.length > 0) {
-          let j = i;
+          // Scan backward from the detect line to find where the recipe block starts.
+          // The first source recipe line might be several lines before the detect match.
+          let blockStart = i;
+          const lookback = Math.min(i, sourceRecipe.length + 2); // don't look back too far
+          for (let back = i; back >= i - lookback; back--) {
+            if (back < 0) break;
+            const backLine = logicalLines[back].text.trim();
+            if (backLine && !backLine.startsWith('#') && 
+                linesMatch(backLine, sourceRecipe[0].trim())) {
+              blockStart = back;
+              break;
+            }
+          }
+          
+          // Forward-match the full source recipe starting from blockStart
+          let j = blockStart;
+          let matchCount = 0;
           for (const srcLine of sourceRecipe) {
             while (j < logicalLines.length) {
               if (logicalLines[j].text.trim() && !logicalLines[j].text.trim().startsWith('#') && 
                   linesMatch(logicalLines[j].text.trim(), srcLine.trim())) {
                 skipIndices.add(j);
+                matchCount++;
                 j++;
                 break;
               }
@@ -269,11 +291,9 @@ export function translateLobsterfile(content, sourceFamily, targetFamily) {
             }
           }
           
-          if (skipIndices.has(i)) {
-            translatedLines.push(`# --- Translated from ${sourceFamily} to ${targetFamily} ---`);
-            for (const targetLine of targetRecipe) {
-              translatedLines.push(targetLine);
-            }
+          // Only emit translation if we matched at least the first line of the recipe
+          if (skipIndices.has(blockStart)) {
+            recipeInsertions.set(blockStart, targetRecipe);
             changes++;
           }
         }
@@ -284,6 +304,13 @@ export function translateLobsterfile(content, sourceFamily, targetFamily) {
   
   // Second pass: translate remaining logical lines
   for (let i = 0; i < logicalLines.length; i++) {
+    // Emit recipe translation at the block start position
+    if (recipeInsertions.has(i)) {
+      translatedLines.push(`# --- Translated from ${sourceFamily} to ${targetFamily} ---`);
+      for (const targetLine of recipeInsertions.get(i)) {
+        translatedLines.push(targetLine);
+      }
+    }
     if (skipIndices.has(i)) continue;
     
     const { translated, changed, warning } = translateLine(logicalLines[i].text, sourceFamily, targetFamily);
@@ -300,14 +327,34 @@ export function translateLobsterfile(content, sourceFamily, targetFamily) {
 }
 
 /**
- * Fuzzy line matching for repo recipe detection
+ * Line matching for repo recipe detection.
+ * Uses exact match after whitespace normalization, with a token-overlap
+ * fallback for lines that differ slightly (e.g. extra flags). The overlap
+ * threshold (80%) prevents short lines like "sudo apt-get update" from
+ * matching unrelated commands that happen to contain those tokens.
  */
 function linesMatch(a, b) {
   // Normalize whitespace and compare
   const normA = a.replace(/\s+/g, ' ').trim();
   const normB = b.replace(/\s+/g, ' ').trim();
-  // Check if one contains the key parts of the other
-  return normA === normB || normA.includes(normB) || normB.includes(normA);
+  
+  // Exact match (fast path)
+  if (normA === normB) return true;
+  
+  // Token-overlap: require ≥80% of the shorter line's tokens to appear in the longer
+  const tokensA = new Set(normA.split(' '));
+  const tokensB = new Set(normB.split(' '));
+  const [smaller, larger] = tokensA.size <= tokensB.size ? [tokensA, tokensB] : [tokensB, tokensA];
+  
+  // Require the shorter side to have enough tokens to be meaningful
+  if (smaller.size < 3) return false;
+  
+  let overlap = 0;
+  for (const token of smaller) {
+    if (larger.has(token)) overlap++;
+  }
+  
+  return overlap / smaller.size >= 0.8;
 }
 
 /**

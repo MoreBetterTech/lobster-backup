@@ -742,8 +742,10 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
     // Step 8b: Restore apt sources and keyrings (before Lobsterfile runs apt install)
     // Third-party packages need their repos configured before `apt install` works.
     // This replays the sources.list.d/ entries and keyrings captured during backup.
+    // Only runs on Debian-family targets — apt sources are meaningless on RHEL/macOS/etc.
     const aptSourcesDir = path.join(extractDir, 'apt-sources');
-    if (fs.existsSync(aptSourcesDir)) {
+    const targetOSForApt = detectOS();
+    if (targetOSForApt.family === 'debian' && fs.existsSync(aptSourcesDir)) {
       io.write('Restoring apt sources and keyrings...\n');
       try {
         restoreAptSources(aptSourcesDir);
@@ -754,6 +756,8 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
         io.write(`  ⚠️  Apt source restore failed: ${error.message}\n`);
         io.write('  Lobsterfile may fail to install third-party packages.\n');
       }
+    } else if (fs.existsSync(aptSourcesDir) && targetOSForApt.family !== 'debian') {
+      io.write(`  ℹ️  Skipping apt source restore (target OS family: ${targetOSForApt.family})\n`);
     }
 
     // Step 8c: Restore user crontab if captured
