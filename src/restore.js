@@ -12,6 +12,41 @@ import { createHash } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
 import { decryptArchive, derivePassphraseKey, unwrapVaultKey, unwrapAgePrivateKey } from './crypto.js';
 import { substituteVariables, parseEnvFile } from './lobsterfile-env.js';
+import { detectOS, compareOS } from './os-detect.js';
+import { translateLobsterfile } from './lobsterfile-translate.js';
+
+/**
+ * Restore captured apt source files and keyrings to their system paths.
+ * Must run BEFORE the Lobsterfile executes, because `apt install caddy`
+ * needs the Caddy repo to be configured first.
+ * 
+ * @param {string} aptSourcesDir - Directory containing captured apt-sources/
+ */
+export function restoreAptSources(aptSourcesDir) {
+  const sourcesListDir = path.join(aptSourcesDir, 'sources.list.d');
+  const keyringsDir = path.join(aptSourcesDir, 'keyrings');
+  
+  // Restore keyrings first (sources reference them via signed-by)
+  if (fs.existsSync(keyringsDir)) {
+    const keyrings = fs.readdirSync(keyringsDir);
+    for (const keyring of keyrings) {
+      const src = path.join(keyringsDir, keyring);
+      const dest = path.join('/usr/share/keyrings', keyring);
+      execFileSync('sudo', ['cp', src, dest], { stdio: 'pipe' });
+      execFileSync('sudo', ['chmod', '644', dest], { stdio: 'pipe' });
+    }
+  }
+  
+  // Restore source files
+  if (fs.existsSync(sourcesListDir)) {
+    const sources = fs.readdirSync(sourcesListDir);
+    for (const source of sources) {
+      const src = path.join(sourcesListDir, source);
+      const dest = path.join('/etc/apt/sources.list.d', source);
+      execFileSync('sudo', ['cp', src, dest], { stdio: 'pipe' });
+    }
+  }
+}
 
 /**
  * List available backup files in the backup directory
@@ -493,6 +528,15 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
   // sudo in the Lobsterfile provides per-command privilege escalation with 
   // syslog audit trail. Running the entire restore as root violates 
   // least-privilege and removes the audit benefit.
+  //
+  // DEBIAN_FRONTEND=noninteractive: only set when the TARGET system is
+  // Debian-family. dpkg's debconf prompts fail without a TTY; this env var
+  // tells debconf to skip interactive dialogs. On RHEL/Arch/Alpine this
+  // variable is meaningless — their package managers don't use debconf.
+  const targetOS = detectOS();
+  const execEnv = targetOS.family === 'debian'
+    ? { ...process.env, DEBIAN_FRONTEND: 'noninteractive' }
+    : { ...process.env };
   try {
     if (continueOnError) {
       // --continue-on-error as opt-in: For experienced users who know which 
@@ -504,7 +548,7 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
       
       for (const line of lines) {
         try {
-          execSync(line, { stdio: 'pipe' });
+          execSync(line, { stdio: 'pipe', env: execEnv });
         } catch (error) {
           failures.push({
             step: line,
@@ -521,7 +565,7 @@ export async function executeLobsterfile({ content, envVars, dryRun, continueOnE
       // the script likely means subsequent steps will fail too (e.g., if apt 
       // install fails, the service that depends on it won't start). Continuing 
       // wastes time and potentially leaves the system in a worse state.
-      execSync(`bash ${tempPath}`, { stdio: 'pipe' });
+      execSync(`bash ${tempPath}`, { stdio: 'pipe', env: execEnv });
     }
   } catch (error) {
     exitCode = 1;
@@ -593,6 +637,24 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
   }
   const archivePath = selection.selectedPath;
   io.write(`Selected backup: ${path.basename(archivePath)}\n`);
+
+  // Step 1b: If no config provided, try loading from sidecar file (.meta.json)
+  // This solves the chicken/egg problem: the config needed to decrypt is normally
+  // inside the encrypted backup, but the sidecar stores it alongside the archive.
+  if (!config || !config.argon2Salt) {
+    const sidecarPath = archivePath.replace(/\.age$/, '.meta.json');
+    if (fs.existsSync(sidecarPath)) {
+      io.write('Loading decryption metadata from sidecar file...\n');
+      const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf8'));
+      config = { ...config, ...sidecar };
+    } else {
+      throw new Error(
+        'No lobster-backup.json config and no sidecar .meta.json found. ' +
+        'Cannot decrypt without key-wrapping metadata. ' +
+        'Copy lobster-backup.json from the original machine or place the .meta.json sidecar next to the backup file.'
+      );
+    }
+  }
 
   // Step 2: Preflight checks
   const installCheck = checkExistingInstall();
@@ -677,10 +739,86 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
       preservePermissions: true,
     });
 
+    // Step 8b: Restore apt sources and keyrings (before Lobsterfile runs apt install)
+    // Third-party packages need their repos configured before `apt install` works.
+    // This replays the sources.list.d/ entries and keyrings captured during backup.
+    // Only runs on Debian-family targets — apt sources are meaningless on RHEL/macOS/etc.
+    const aptSourcesDir = path.join(extractDir, 'apt-sources');
+    const targetOSForApt = detectOS();
+    if (targetOSForApt.family === 'debian' && fs.existsSync(aptSourcesDir)) {
+      io.write('Restoring apt sources and keyrings...\n');
+      try {
+        restoreAptSources(aptSourcesDir);
+        io.write('  Apt sources restored. Running apt update...\n');
+        execSync('sudo apt-get update', { stdio: 'pipe' });
+        io.write('  Done.\n');
+      } catch (error) {
+        io.write(`  ⚠️  Apt source restore failed: ${error.message}\n`);
+        io.write('  Lobsterfile may fail to install third-party packages.\n');
+      }
+    } else if (fs.existsSync(aptSourcesDir) && targetOSForApt.family !== 'debian') {
+      io.write(`  ℹ️  Skipping apt source restore (target OS family: ${targetOSForApt.family})\n`);
+    }
+
+    // Step 8c: Restore user crontab if captured
+    const crontabPath = path.join(extractDir, 'crontab');
+    if (fs.existsSync(crontabPath)) {
+      const crontabContent = fs.readFileSync(crontabPath, 'utf8');
+      io.write('Restoring user crontab...\n');
+      try {
+        // Merge with existing crontab (sort -u deduplicates)
+        let existingCrontab = '';
+        try {
+          existingCrontab = execSync('crontab -l', { encoding: 'utf8', stdio: 'pipe' });
+        } catch { /* no existing crontab */ }
+        const merged = (existingCrontab + '\n' + crontabContent)
+          .split('\n')
+          .filter(line => line.trim())
+          .filter((line, i, arr) => arr.indexOf(line) === i)  // deduplicate
+          .join('\n') + '\n';
+        execSync('crontab -', { input: merged, stdio: 'pipe' });
+        io.write('  Crontab restored (merged with existing entries).\n');
+      } catch (error) {
+        io.write(`  ⚠️  Crontab restore failed: ${error.message}\n`);
+      }
+    }
+
     // Step 9: Handle Lobsterfile
     const lobsterfilePath = path.join(extractDir, 'lobsterfile');
     if (fs.existsSync(lobsterfilePath)) {
-      const lobsterfileContent = fs.readFileSync(lobsterfilePath, 'utf8');
+      let lobsterfileContent = fs.readFileSync(lobsterfilePath, 'utf8');
+
+      // Step 9a: OS comparison — detect cross-family migrations
+      // If the backup was made on Ubuntu but we're restoring to Rocky Linux,
+      // the Lobsterfile's apt commands need to become dnf commands.
+      const targetOS = detectOS();
+      if (meta && meta.os) {
+        const osComparison = compareOS(meta.os, targetOS);
+        
+        for (const warning of osComparison.warnings) {
+          io.write(`\n⚠️  ${warning}\n`);
+        }
+        
+        if (osComparison.translationNeeded) {
+          io.write('\n🔄 Translating Lobsterfile commands for target system...\n');
+          const translation = translateLobsterfile(lobsterfileContent, meta.os.family, targetOS.family);
+          
+          if (translation.changes > 0) {
+            io.write(`   ${translation.changes} command(s) translated (${meta.os.family} → ${targetOS.family})\n`);
+            for (const w of translation.warnings) {
+              io.write(`   ⚠️  ${w}\n`);
+            }
+            lobsterfileContent = translation.translated;
+          } else {
+            io.write('   No translatable commands found.\n');
+          }
+        }
+        
+        if (!osComparison.compatible) {
+          io.write('\n❌ Cross-platform restore is not supported. Lobsterfile will not be executed.\n');
+          io.write('   Review and adapt the Lobsterfile manually.\n');
+        }
+      }
 
       // Load env vars
       const envFilePath = path.join(extractDir, 'lobsterfile.env');
@@ -696,7 +834,14 @@ export async function runRestore({ config, dryRun, io, from, credentialType, pas
       const reviewResult = await displayLobsterfile(substitutedContent, io);
       if (reviewResult.confirmed) {
         io.write('Executing Lobsterfile...\n');
-        await executeLobsterfile({ content: lobsterfileContent, envVars, io });
+        const execResult = await executeLobsterfile({ content: lobsterfileContent, envVars, io, continueOnError: true });
+        if (execResult.failures && execResult.failures.length > 0) {
+          io.write(`\n⚠️  ${execResult.failures.length} step(s) failed during Lobsterfile execution:\n`);
+          for (const f of execResult.failures) {
+            io.write(`  ✗ ${f.step}\n    → ${f.error.split('\n')[0]}\n`);
+          }
+          io.write('\nReview the failures above and run failed steps manually if needed.\n');
+        }
       } else {
         io.write('Lobsterfile execution skipped by user.\n');
       }

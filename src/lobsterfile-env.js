@@ -46,17 +46,26 @@ export function parseEnvFile(content) {
  * @returns {string} String with substituted values
  */
 export function substituteVariables(template, variables) {
-  // Replace {{VARIABLE_NAME}} with values
-  // Only replace if the content inside braces is a valid variable name
-  // Missing variable throws, not silently skips: A Lobsterfile with 
-  // {{GATEWAY_PORT}} that substitutes to nothing would produce 
-  // `reverse_proxy localhost:` — a broken config deployed with sudo. Fail loudly.
-  const result = template.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g, (match, variableName) => {
-    if (!(variableName in variables)) {
-      throw new Error(`Missing variable: ${variableName}`);
+  // Replace {{VARIABLE_NAME}} with values, but skip bash comment lines.
+  // The Lobsterfile header contains "Use {{VARIABLE}} placeholders..." as
+  // documentation — substituting inside comments would throw "Missing variable"
+  // for the example placeholder and break restore on an otherwise valid file.
+  const lines = template.split('\n');
+  const result = lines.map(line => {
+    // Skip comment lines — don't substitute inside bash comments
+    if (line.trimStart().startsWith('#')) {
+      return line;
     }
-    return variables[variableName];
-  });
+    // Missing variable throws, not silently skips: A Lobsterfile with 
+    // {{GATEWAY_PORT}} that substitutes to nothing would produce 
+    // `reverse_proxy localhost:` — a broken config deployed with sudo. Fail loudly.
+    return line.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g, (match, variableName) => {
+      if (!(variableName in variables)) {
+        throw new Error(`Missing variable: ${variableName}`);
+      }
+      return variables[variableName];
+    });
+  }).join('\n');
   
   return result;
 }
@@ -102,16 +111,23 @@ export function writeEnvFile(envFilePath, variables) {
  * @returns {string[]} Array of new variable names
  */
 export function detectNewVariables(lobsterfileContent, existingEnv) {
-  // Use same placeholder detection logic as lobsterfile.js
+  // Use same placeholder detection logic as lobsterfile.js, but skip comment lines.
+  // Comments may contain example placeholders (e.g. "Use {{VARIABLE}} for...").
   const variables = new Set();
   
   const placeholderRegex = /\{\{([A-Z_][A-Z0-9_]*)\}\}/g;
-  let match;
+  const lines = lobsterfileContent.split('\n');
   
-  while ((match = placeholderRegex.exec(lobsterfileContent)) !== null) {
-    const variableName = match[1];
-    if (variableName) {
-      variables.add(variableName);
+  for (const line of lines) {
+    // Skip comment lines
+    if (line.trimStart().startsWith('#')) continue;
+    
+    let match;
+    while ((match = placeholderRegex.exec(line)) !== null) {
+      const variableName = match[1];
+      if (variableName) {
+        variables.add(variableName);
+      }
     }
   }
   

@@ -8,6 +8,7 @@ import {
   scanForFindings,
   presentFindings,
   registerFindings,
+  verifyLobsterfileCoverage,
 } from '../src/scan.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -220,6 +221,49 @@ describe('Lobster Scan', () => {
       expect(inputs.grepTargets).toBeDefined();
       expect(inputs.grepTargets.length).toBeGreaterThan(0);
       expect(inputs.warning).toMatch(/openclaw\.json|not found|default/i);
+    });
+  });
+
+  describe('Lobsterfile coverage verification (#22)', () => {
+    it('warns when Caddy config registered but no install in Lobsterfile', () => {
+      const manifest = ['/etc/caddy/Caddyfile'];
+      const lobsterfile = '#!/bin/bash\n# empty\n';
+      const warnings = verifyLobsterfileCoverage(manifest, lobsterfile);
+      expect(warnings.some(w => w.package === 'caddy' && w.type === 'missing-install')).toBe(true);
+    });
+
+    it('no warnings when Lobsterfile has install and enable for Caddy', () => {
+      const manifest = ['/etc/caddy/Caddyfile'];
+      const lobsterfile = '#!/bin/bash\nsudo apt-get install -y caddy\nsudo systemctl enable caddy\n';
+      const warnings = verifyLobsterfileCoverage(manifest, lobsterfile);
+      expect(warnings.length).toBe(0);
+    });
+
+    it('warns about systemd unit not referenced in Lobsterfile', () => {
+      const manifest = ['/etc/systemd/system/freshkit.service'];
+      const lobsterfile = '#!/bin/bash\nsudo apt-get install -y caddy\n';
+      const warnings = verifyLobsterfileCoverage(manifest, lobsterfile);
+      expect(warnings.some(w => w.type === 'missing-service' && w.path.includes('freshkit'))).toBe(true);
+    });
+
+    it('no warning when systemd unit is referenced in Lobsterfile', () => {
+      const manifest = ['/etc/systemd/system/freshkit.service'];
+      const lobsterfile = '#!/bin/bash\nsudo systemctl enable freshkit\n';
+      const warnings = verifyLobsterfileCoverage(manifest, lobsterfile);
+      const freshkitWarnings = warnings.filter(w => w.path.includes('freshkit'));
+      expect(freshkitWarnings.length).toBe(0);
+    });
+
+    it('handles empty manifest gracefully', () => {
+      const warnings = verifyLobsterfileCoverage([], '#!/bin/bash\n');
+      expect(warnings).toEqual([]);
+    });
+
+    it('detects multiple missing dependencies', () => {
+      const manifest = ['/etc/caddy/Caddyfile', '/etc/nginx/nginx.conf'];
+      const lobsterfile = '#!/bin/bash\n# nothing here\n';
+      const warnings = verifyLobsterfileCoverage(manifest, lobsterfile);
+      expect(warnings.length).toBeGreaterThanOrEqual(2);
     });
   });
 });

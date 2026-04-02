@@ -101,6 +101,23 @@ describe('Lobsterfile Variables', () => {
       expect(result).toContain('{{ curly braces }}');
       expect(result).toContain('hello');
     });
+
+    it('skips {{VARIABLE}} placeholders inside bash comments (#20)', () => {
+      const template = '#!/bin/bash\n# Use {{VARIABLE}} placeholders for values\nsudo apt install {{PACKAGE}}';
+      const vars = { PACKAGE: 'caddy' };
+      // Should NOT throw "Missing variable: VARIABLE" — it's in a comment
+      const result = substituteVariables(template, vars);
+      expect(result).toContain('# Use {{VARIABLE}} placeholders for values');
+      expect(result).toContain('sudo apt install caddy');
+    });
+
+    it('skips {{VARIABLE}} in comments but substitutes on non-comment lines', () => {
+      const template = '# Config for {{EXAMPLE}}\nreverse_proxy localhost:{{PORT}}';
+      const vars = { PORT: '18789' };
+      const result = substituteVariables(template, vars);
+      expect(result).toContain('# Config for {{EXAMPLE}}');
+      expect(result).toContain('reverse_proxy localhost:18789');
+    });
   });
 
   // --- File Management ---
@@ -145,6 +162,15 @@ describe('Lobsterfile Variables', () => {
 
       const newVars = detectNewVariables(lobsterfileContent, existingEnv);
       expect(newVars).toEqual([]);
+    });
+
+    it('detectNewVariables ignores placeholders inside comments (#20)', () => {
+      const lobsterfileContent = '# Use {{VARIABLE}} placeholders\n{{REAL_PORT}} is used here';
+      const existingEnv = {};
+
+      const newVars = detectNewVariables(lobsterfileContent, existingEnv);
+      // Should only find REAL_PORT, not VARIABLE (which is in a comment)
+      expect(newVars).toEqual(['REAL_PORT']);
     });
   });
 });

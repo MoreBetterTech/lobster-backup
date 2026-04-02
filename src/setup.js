@@ -21,6 +21,7 @@ import {
 } from './crypto.js';
 import { writeConfig } from './config.js';
 import { detectPlaceholders as lobsterfileDetectPlaceholders, initLobsterfile } from './lobsterfile.js';
+import { classifyPackages } from './package-recipes.js';
 
 /**
  * Validate passphrase strength and confirmation
@@ -108,6 +109,7 @@ export async function runSetup(options) {
   // If someone calls runSetup programmatically, they're responsible for prereqs.
 
   // 1. Check for existing config
+  let isReconfigure = false;
   const configPath = path.join(os.homedir(), '.openclaw', 'lobster-backup.json');
   if (fs.existsSync(configPath)) {
     io.write('⚠️  Lobster backup is already configured on this system.');
@@ -116,6 +118,7 @@ export async function runSetup(options) {
     if (reconfigure.toLowerCase() !== 'y' && reconfigure.toLowerCase() !== 'yes') {
       throw new Error('Setup cancelled - existing configuration preserved');
     }
+    isReconfigure = true;
   }
 
   // 2. Validate passphrase
@@ -203,10 +206,24 @@ export async function runSetup(options) {
 
   writeConfig(config);
 
-  // 11. Initialize Lobsterfile if it doesn't exist
-  const lobsterfilePath = path.join(os.homedir(), '.openclaw', 'lobsterfile');
-  const seedPath = path.join(os.homedir(), '.openclaw', 'lobsterfile.seed');
-  const lobsterfileResult = initLobsterfile(lobsterfilePath, { seedPath });
+  // 11. Run environment audit to generate lobsterfile.seed
+  // This was missing — setup created the Lobsterfile header but never ran the
+  // audit to discover installed packages/services, leaving it empty.
+  const ocDir = path.join(os.homedir(), '.openclaw');
+  const seedPath = path.join(ocDir, 'lobsterfile.seed');
+  if (!skipScan) {
+    io.write('\n🔍 Running environment audit...');
+    try {
+      await runEnvironmentAudit(ocDir);
+      io.write('  Done.');
+    } catch (error) {
+      io.write(`  ⚠️  Audit failed: ${error.message} (continuing without seed)`);
+    }
+  }
+
+  // 11b. Initialize Lobsterfile (seeded from audit if available)
+  const lobsterfilePath = path.join(ocDir, 'lobsterfile');
+  const lobsterfileResult = initLobsterfile(lobsterfilePath, { seedPath, force: isReconfigure });
   
   if (lobsterfileResult.created) {
     io.write(`\n📝 Created Lobsterfile at ${lobsterfilePath}`);
@@ -215,6 +232,7 @@ export async function runSetup(options) {
     }
   } else {
     io.write('\n📝 Lobsterfile already exists — not overwritten.');
+    io.write('   Use `lobster setup --force` to regenerate, or edit it manually.');
   }
 
   io.write('\n✅ Lobster backup has been configured successfully!');
@@ -313,43 +331,122 @@ export async function runEnvironmentAudit(outputDir) {
   // pip or systemctl. The audit should capture what it can, not fail on 
   // what it can't.
   try {
-    // APT packages
-    const aptOutput = execSync('dpkg --get-selections | grep -v deinstall', { 
+    // APT packages — use apt-mark showmanual to get only user-installed packages.
+    // dpkg --get-selections returns EVERY package (hundreds of base system packages)
+    // which is noise. apt-mark showmanual returns only what was explicitly installed,
+    // which is what needs to go in the Lobsterfile.
+    //
+    // Even apt-mark showmanual includes base system packages (bash, grep, login)
+    // and distro/cloud-specific packages (linux-aws, ubuntu-server, cloud-init).
+    // These ship with the OS image and don't need to be in the Lobsterfile —
+    // they'll be there on any fresh install of the same OS. Filter them out.
+    const aptOutput = execSync('apt-mark showmanual 2>/dev/null || dpkg --get-selections | grep -v deinstall', { 
       encoding: 'utf-8', 
       stdio: 'pipe' 
     });
+    
+    // Base system packages to exclude — these come with any minimal OS install
+    // and don't need to be restored. Patterns match package name prefixes.
+    const BASE_PACKAGE_PATTERNS = [
+      /^base-files$/, /^bash$/, /^bsdutils$/, /^coreutils$/,
+      /^dash$/, /^diffutils$/, /^findutils$/, /^grep$/, /^gzip$/,
+      /^hostname$/, /^init$/, /^login$/, /^ncurses-/,
+      /^util-linux$/, /^sed$/, /^tar$/,
+      // Kernel and boot packages (distro/arch-specific)
+      /^linux-/, /^grub-/, /^shim-signed$/,
+      // Cloud/platform packages (come with the cloud image)
+      /^cloud-init$/, /^ec2-/, /^amazon-/,
+      // Distro meta-packages
+      /^ubuntu-minimal$/, /^ubuntu-server$/, /^ubuntu-standard$/,
+      /^debian-/, 
+      // Snap/systemd infra
+      /^snapd$/, /^snap\./,
+      // Low-level libs that are dependencies, not user choices
+      /^libeatmydata/, /^libwrap/, /^eatmydata$/,
+      // SSH (comes with server images)
+      /^openssh-/,
+      // Other base infra
+      /^ca-certificates$/, /^fuse3?$/, /^irqbalance$/,
+      /^python-babel/, /^python3-babel/, /^python3-jinja2/,
+      /^python3-json/, /^python3-markupsafe/, /^python3-pyrsistent/,
+      /^ssh-import-id$/,
+    ];
+    
     results.packages = aptOutput.trim().split('\n')
       .filter(line => line.trim())
-      .map(line => line.split('\t')[0]);
+      .map(line => line.split(/\s/)[0])
+      .filter(pkg => !BASE_PACKAGE_PATTERNS.some(p => p.test(pkg)));
   } catch (error) {
-    // Gracefully handle missing dpkg
+    // Gracefully handle missing dpkg/apt-mark
   }
 
   try {
-    // Global npm packages
-    const npmOutput = execSync('npm list -g --depth=0', { 
+    // Global npm packages.
+    // Use --json for reliable parsing — the default tree format includes
+    // box-drawing characters (├──, └──) that are NOT valid npm package names.
+    // Previous bug: seed captured "npm install -g ├── lobster-backup" literally.
+    const npmOutput = execSync('npm list -g --depth=0 --json 2>/dev/null || npm list -g --depth=0', { 
       encoding: 'utf-8', 
       stdio: 'pipe' 
     });
-    // Parse npm output to extract package names
-    results.npmPackages = npmOutput.split('\n')
-      .filter(line => line.includes('@'))
-      .map(line => line.split('@')[0].trim())
-      .filter(pkg => pkg && pkg !== '');
+    try {
+      const npmJson = JSON.parse(npmOutput);
+      // Separate registry packages from local-linked ones.
+      // Local-linked packages (resolved to file: paths) can't be installed
+      // via `npm install -g <name>` — they'd 404 on the registry.
+      // Instead they need `npm link` from their local path after restore.
+      results.npmPackages = [];
+      results.npmLocalPackages = [];
+      for (const [name, info] of Object.entries(npmJson.dependencies || {})) {
+        if (info.resolved && info.resolved.startsWith('file:')) {
+          results.npmLocalPackages.push({ name, path: info.resolved.replace('file:', '') });
+        } else {
+          results.npmPackages.push(name);
+        }
+      }
+    } catch {
+      // Fallback: parse tree output, strip box-drawing chars
+      results.npmPackages = npmOutput.split('\n')
+        .filter(line => line.includes('@'))
+        .map(line => line.replace(/[├└─┬│ ]+/g, '').trim())
+        .map(line => line.split('@')[0])
+        .filter(pkg => pkg && pkg.length > 0 && !pkg.includes('/'));
+    }
   } catch (error) {
     // Gracefully handle missing npm
   }
 
   try {
-    // Enabled systemd services
+    // Enabled systemd services.
+    // Filter to only user-relevant services — skip OS infra (cloud-init, snapd,
+    // apparmor, systemd-*, getty@, etc.) that come enabled by default.
+    // The Lobsterfile should only enable services the user explicitly set up.
     const systemctlOutput = execSync('systemctl list-unit-files --state=enabled', { 
       encoding: 'utf-8', 
       stdio: 'pipe' 
     });
+    
+    const BASE_SERVICE_PATTERNS = [
+      /^apparmor/, /^apport/, /^blk-availability/,
+      /^chrony/, /^cloud-/, /^console-setup/, /^cron\./,
+      /^dmesg/, /^e2scrub/, /^ec2-/, /^finalrd/,
+      /^getty@/, /^grub-/, /^hibinit/,
+      /^irqbalance/, /^keyboard-setup/, /^lvm2/,
+      /^ModemManager/, /^multipathd/,
+      /^networkd-dispatcher/, /^open-iscsi/, /^open-vm-tools/,
+      /^pollinate/, /^rsyslog/,
+      /^secureboot/, /^setvtrgb/,
+      /^snap\./, /^snapd/,
+      /^sysstat/, /^systemd-/,
+      /^ua-reboot/, /^ubuntu-advantage/, /^udisks2/,
+      /^ufw/, /^unattended-upgrades/, /^vgauth/,
+    ];
+    
     results.services = systemctlOutput.split('\n')
       .filter(line => line.includes('enabled'))
       .map(line => line.split(/\s+/)[0])
-      .filter(service => service && service.endsWith('.service'));
+      .filter(service => service && service.endsWith('.service'))
+      .filter(service => !BASE_SERVICE_PATTERNS.some(p => p.test(service)));
   } catch (error) {
     // Gracefully handle missing systemctl
   }
@@ -378,16 +475,31 @@ export async function runEnvironmentAudit(outputDir) {
   seedContent += '# Generated by environment audit - review and refine as needed\n';
   seedContent += '# This captures current state, not the build sequence\n\n';
 
-  // Add APT packages
+  // Classify APT packages: third-party packages that need repo setup get
+  // known recipes, everything else gets a plain `apt install`.
   if (results.packages.length > 0) {
-    seedContent += '# APT packages\n';
-    for (const pkg of results.packages) {
-      seedContent += `apt-get install -y ${pkg}\n`;
+    const { recipePackages, plainPackages } = classifyPackages(results.packages);
+    
+    // Add third-party repo setup recipes first
+    if (recipePackages.length > 0) {
+      seedContent += '# Third-party package repos (require setup before apt install)\n';
+      for (const { recipe } of recipePackages) {
+        seedContent += recipe() + '\n';
+      }
     }
-    seedContent += '\n';
+    
+    // Add remaining packages as a single install line (idempotent)
+    if (plainPackages.length > 0) {
+      seedContent += '# APT packages (user-installed)\n';
+      seedContent += 'sudo apt-get update\n';
+      seedContent += `sudo apt-get install -y ${plainPackages.join(' ')}\n`;
+      seedContent += '\n';
+    }
   }
 
-  // Add npm packages
+  // Add npm packages (registry)
+  // No sudo: nvm installs put the global prefix in ~/.nvm which is user-owned.
+  // System Node installs may need sudo, but the user can escalate manually.
   if (results.npmPackages.length > 0) {
     seedContent += '# Global npm packages\n';
     for (const pkg of results.npmPackages) {
@@ -396,11 +508,20 @@ export async function runEnvironmentAudit(outputDir) {
     seedContent += '\n';
   }
 
+  // Add local-linked npm packages (restored from backup, just need re-linking)
+  if (results.npmLocalPackages && results.npmLocalPackages.length > 0) {
+    seedContent += '# Local npm packages (re-link after restore)\n';
+    for (const { name, path: pkgPath } of results.npmLocalPackages) {
+      seedContent += `cd ${pkgPath} && npm link\n`;
+    }
+    seedContent += '\n';
+  }
+
   // Add enabled services
   if (results.services.length > 0) {
     seedContent += '# Enabled services\n';
     for (const service of results.services) {
-      seedContent += `systemctl enable ${service}\n`;
+      seedContent += `sudo systemctl enable ${service}\n`;
     }
     seedContent += '\n';
   }
